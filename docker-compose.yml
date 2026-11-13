@@ -1,0 +1,52 @@
+services:
+  facebook-pages-mcp:
+    build: .
+    image: facebook-pages-mcp-server:latest
+    container_name: facebook-pages-mcp-server
+    restart: unless-stopped
+    ports:
+      # Published host port : container port. Change the left side to rebind.
+      - "${MCP_HTTP_PORT:-8900}:8900"
+    environment:
+      # --- Facebook (FB_PAGE_TOKEN is required) ---
+      FB_PAGE_TOKEN: "${FB_PAGE_TOKEN:?set FB_PAGE_TOKEN in .env}"
+      FB_USER_TOKEN: "${FB_USER_TOKEN:-}"
+      FB_GRAPH_VERSION: "${FB_GRAPH_VERSION:-v25.0}"
+      FB_GRAPH_BASE_URL: "${FB_GRAPH_BASE_URL:-https://graph.facebook.com}"
+      FB_VERIFY_SSL: "${FB_VERIFY_SSL:-true}"
+      FB_TIMEOUT: "${FB_TIMEOUT:-30}"
+      FB_MAX_RETRIES: "${FB_MAX_RETRIES:-2}"
+      # --- MCP server (required for HTTP transport) ---
+      MCP_API_KEY: "${MCP_API_KEY:?set MCP_API_KEY in .env (generate: facebook-pages-mcp-server gen-key)}"
+      MCP_HTTP_HOST: "0.0.0.0"
+      MCP_HTTP_PORT: "8900"
+      # DNS-rebinding protection: list the hostname(s) clients use, e.g.
+      # MCP_ALLOWED_HOSTS: "fb-mcp.example.com:8900"
+      # MCP_ALLOWED_ORIGINS: "https://fb-mcp.example.com"
+      MCP_ALLOWED_HOSTS: "${MCP_ALLOWED_HOSTS:-}"
+      MCP_ALLOWED_ORIGINS: "${MCP_ALLOWED_ORIGINS:-}"
+      # Tool permissions: which tools the AI may use, by what they do to
+      # Facebook data (see .env.example for the full explanation + warnings):
+      #   read = fetch only   write = publish/comment/upload   delete = remove (dangerous)
+      # Default (unset) is read-only. Use e.g. "read,write" to let the AI publish.
+      MCP_TOOL_PERMISSIONS: "${MCP_TOOL_PERMISSIONS:-read}"
+      MCP_LOG_LEVEL: "${MCP_LOG_LEVEL:-INFO}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Hardening: no privileged access, read-only root filesystem, drop all
+    # capabilities. The server only needs outbound network access.
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
