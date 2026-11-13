@@ -4,8 +4,8 @@ An [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server that l
 agents work with Facebook Pages through the [Graph API](https://developers.facebook.com/docs/graph-api).
 
 An agent can list the Pages a person manages, read Page details, posts, comments,
-photos, videos, events, Messenger conversations and Page Insights, and — if you
-allow it — publish posts, comment, upload media, and delete posts or comments.
+photos, videos, events, Messenger conversations and Page Insights. If you allow
+it, it can also publish posts, comment, upload media, and delete content.
 
 Built on the [MCP Python SDK](https://py.sdk.modelcontextprotocol.io) (v2, `MCPServer`).
 Tested against Graph API `v25.0`; the version is configurable.
@@ -21,7 +21,7 @@ review the code before relying on it, especially for anything security-sensitive
 ## Graph API coverage
 
 Tools are grouped by what the underlying Graph API call does. The group decides
-whether a tool is registered at all — see [Tool permissions](#tool-permissions).
+whether a tool is registered at all. See [Tool permissions](#tool-permissions).
 
 | Tool | Graph API | Group |
 |---|---|---|
@@ -314,7 +314,7 @@ tests/
   enabling `write` or `delete`.
 - `MCP_TOOL_PERMISSIONS` is the first line of defense: the AI only ever sees the
   tools you allow (read-only by default). It complements, not replaces, the
-  scopes on the Facebook token — use both.
+  scopes on the Facebook token. Use both.
 
 ## License
 
