@@ -51,6 +51,7 @@ from .specs import (
     PHOTO_FIELDS,
     POST_FIELDS,
     POST_INSIGHTS_METRICS,
+    RETIRED_INSIGHTS_METRICS,
     TOOL_SPECS,
     VIDEO_FIELDS,
     join_fields,
@@ -352,6 +353,10 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         return {
             "page_metrics_by_group": {name: list(metrics) for name, metrics in groups.items()},
             "post_metrics": list(POST_INSIGHTS_METRICS),
+            "retired_metrics": {
+                name: (replacement or "no replacement")
+                for name, replacement in RETIRED_INSIGHTS_METRICS.items()
+            },
             "periods": ["day", "week", "days_28", "lifetime", "total_over_range"],
             "date_presets": [
                 "last_7d",
@@ -366,7 +371,8 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             ],
             "note": (
                 "Meta deprecates metrics by API version, and Pages under 100 likes return "
-                "no insights. When a metric fails the error names it; try another."
+                "no insights. A retired metric fails the whole request, so do not add one "
+                "from retired_metrics; use its replacement instead."
             ),
         }
 

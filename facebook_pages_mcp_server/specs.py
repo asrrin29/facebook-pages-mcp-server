@@ -167,23 +167,17 @@ MESSAGE_FIELDS: tuple[str, ...] = (
 
 # A starter list of Page Insights metrics. Meta changes this list often and
 # deprecates metrics by API version, so treat it as a starting point and let
-# the API report an invalid-metric error rather than trusting this list.
+# the API report an invalid-metric error rather than trusting this list. Reach
+# metrics are excluded here and listed in RETIRED_INSIGHTS_METRICS below.
 INSIGHTS_METRICS: dict[str, tuple[str, ...]] = {
     "audience": ("page_fans", "page_fan_adds", "page_fan_removes", "page_fans_country", "page_fans_city"),
     "engagement": (
         "page_post_engagements",
-        "page_impressions",
-        "page_impressions_paid",
         "page_total_actions",
         "page_views_total",
     ),
     "followers": ("page_daily_follows", "page_daily_unfollows_unique", "page_lifetime_engaged_followers_unique"),
-    "posts": (
-        "page_posts_impressions",
-        "page_posts_impressions_paid",
-        "post_clicks",
-        "post_activity_by_action_type",
-    ),
+    "posts": ("post_clicks", "post_activity_by_action_type"),
     "reactions": (
         "page_actions_post_reactions_total",
         "page_actions_post_reactions_like_total",
@@ -201,12 +195,36 @@ INSIGHTS_METRICS: dict[str, tuple[str, ...]] = {
     "monetization": ("content_monetization_earnings", "monetization_approximate_earnings"),
 }
 
+# Meta retired the reach metrics (``*_impressions*``) around Graph API v26.0.
+# Only total reach has a replacement; the paid, viral, non-viral, fan and
+# organic breakdowns are gone with no equivalent. They are listed here so the
+# discovery tool can name a replacement instead of offering a metric that fails
+# the whole Insights request.
+RETIRED_INSIGHTS_METRICS: dict[str, str] = {
+    "page_impressions": "page_total_media_view_unique",
+    "page_impressions_unique": "page_total_media_view_unique",
+    "page_impressions_paid": "",
+    "page_impressions_paid_unique": "",
+    "page_impressions_viral_unique": "",
+    "page_impressions_nonviral_unique": "",
+    "page_posts_impressions": "",
+    "page_posts_impressions_paid": "",
+    "post_impressions": "post_total_media_view_unique",
+    "post_impressions_unique": "post_total_media_view_unique",
+    "post_impressions_paid": "",
+    "post_impressions_paid_unique": "",
+    "post_impressions_organic": "",
+    "post_impressions_organic_unique": "",
+    "post_impressions_fan_unique": "",
+    "post_impressions_viral_unique": "",
+    "post_impressions_nonviral_unique": "",
+}
+
 POST_INSIGHTS_METRICS: tuple[str, ...] = (
-    "post_impressions",
-    "post_impressions_paid",
-    "post_impressions_organic",
-    "post_clicks",
+    "post_total_media_view_unique",
     "post_media_view",
+    "post_clicks",
+    "post_clicks_by_type",
     "post_reactions_by_type_total",
     "post_video_views",
     "post_activity_by_action_type",
@@ -289,7 +307,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         summary="Read Page metrics",
         api="GET {page_id}/insights",
         description=(
-            "Read Page-level metrics (impressions, reach, engagements, follower growth, "
+            "Read Page-level metrics (reach, engagements, follower growth, "
             "video views, reactions, demographics). Pass one or more metric names, a "
             "period (day, week, days_28, lifetime) and either date_preset or since/until. "
             "Call page_insights_metrics for a list of metric names to try."
@@ -306,7 +324,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         summary="Read one post's metrics",
         api="GET {post_id}/insights",
         description=(
-            "Read metrics for a single post: impressions, reach, clicks, media views, "
+            "Read metrics for a single post: reach, clicks, media views, "
             "reactions by type, video views. Pass one or more metric names."
         ),
     ),
@@ -316,8 +334,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         summary="List Page Insights metric names to try",
         api="(static reference)",
         description=(
-            "List common Page and post Insights metric names grouped by purpose, with the "
-            "periods each supports. Meta changes this list often, so treat it as a "
+            "List common Page and post Insights metric names grouped by purpose, plus the "
+            "periods and date presets the API accepts. Retired metrics are listed "
+            "separately with their replacements, because one retired metric fails the "
+            "whole Insights request. Meta changes this list often, so treat it as a "
             "starting point and let the API tell you when a metric is unavailable."
         ),
     ),

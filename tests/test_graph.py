@@ -8,7 +8,12 @@ import json
 import pytest
 import uvicorn
 
-from facebook_pages_mcp_server.config import Config, ConfigError, load_config
+from facebook_pages_mcp_server.config import (
+    DEFAULT_GRAPH_VERSION,
+    Config,
+    ConfigError,
+    load_config,
+)
 from facebook_pages_mcp_server.graph import GraphClient, GraphError
 from facebook_pages_mcp_server.specs import PAGE_FIELDS, join_fields
 from tests import mock_graph
@@ -20,7 +25,7 @@ def _config(**overrides) -> Config:
     base = dict(
         page_token=mock_graph.VALID_TOKEN,
         graph_base_url=MOCK_ORIGIN,
-        graph_version="v25.0",
+        graph_version="v27.0",
         timeout_seconds=10.0,
     )
     base.update(overrides)
@@ -82,6 +87,26 @@ def test_load_config_reads_environment(monkeypatch):
     assert cfg.graph_version == "v24.0"  # a bare number gets the v prefix
     assert cfg.api_root.endswith("/v24.0")
     assert cfg.tool_permissions == ("read", "write")  # canonical order, de-duplicated
+
+
+def test_default_graph_version_is_current():
+    # Meta issues app tokens only for the current version line, so the default
+    # has to be a version a new app can actually be created on.
+    assert DEFAULT_GRAPH_VERSION == "v27.0"
+
+
+def test_graph_version_shape_is_checked(monkeypatch):
+    # Graph itself rejects a bare major: /v27/me returns "Unknown path components".
+    for bad in ("latest", "v", "vx.y", "27-beta", "v27"):
+        monkeypatch.setenv("FB_GRAPH_VERSION", bad)
+        with pytest.raises(ConfigError, match="FB_GRAPH_VERSION"):
+            load_config()
+
+
+def test_blank_graph_version_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("FB_PAGE_TOKEN", "page-token")
+    monkeypatch.setenv("FB_GRAPH_VERSION", "   ")
+    assert load_config().graph_version == DEFAULT_GRAPH_VERSION
 
 
 def test_missing_page_token_is_a_clear_error(monkeypatch):
@@ -231,5 +256,5 @@ async def test_batch_sends_json_in_form_field(graph):
 
 async def test_get_url_follows_absolute_pagination_link(graph):
     async with GraphClient(_config(graph_base_url=graph.base_url)) as client:
-        payload = await client.get_url(f"{graph.base_url}/v25.0/1001/next-page")
+        payload = await client.get_url(f"{graph.base_url}/v27.0/1001/next-page")
     assert payload["data"][0]["id"] == "1001_7003"

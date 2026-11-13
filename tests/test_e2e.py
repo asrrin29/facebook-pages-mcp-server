@@ -65,7 +65,7 @@ def _env(mock: MockGraph, **extra) -> dict[str, str]:
     env.update(
         FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
         FB_GRAPH_BASE_URL=mock.base_url,
-        FB_GRAPH_VERSION="v25.0",
+        FB_GRAPH_VERSION="v27.0",
         MCP_LOG_LEVEL="WARNING",
     )
     env.update({k: v for k, v in extra.items() if v is not None})
@@ -153,7 +153,7 @@ async def test_stdio_tool_list_and_calls(mock):
         data = _tool_text(await client.call_tool("facebook_pages_status", {"ping": True}))
         assert data["ready"] is True
         assert data["ping"]["ok"] is True
-        assert data["graph_version"] == "v25.0"
+        assert data["graph_version"] == "v27.0"
 
         # list the Pages the token manages
         data = _tool_text(await client.call_tool("pages_list", {"limit": 10}))
@@ -198,7 +198,17 @@ async def test_stdio_tool_list_and_calls(mock):
 
         # metric reference
         data = _tool_text(await client.call_tool("page_insights_metrics", {"group": "engagement"}))
-        assert "page_impressions" in data["page_metrics_by_group"]["engagement"]
+        assert "page_post_engagements" in data["page_metrics_by_group"]["engagement"]
+        assert set(data["page_metrics_by_group"]) == {"engagement"}
+
+        all_metrics = _tool_text(await client.call_tool("page_insights_metrics", {}))
+        # A retired metric would fail the whole Insights request, so it is never
+        # offered; the tool names its replacement instead.
+        offered = [
+            metric for metrics in all_metrics["page_metrics_by_group"].values() for metric in metrics
+        ] + all_metrics["post_metrics"]
+        assert not [m for m in offered if m in all_metrics["retired_metrics"]]
+        assert all_metrics["retired_metrics"]["page_impressions"] == "page_total_media_view_unique"
 
         # batch read: one call, two Graph requests
         data = _tool_text(

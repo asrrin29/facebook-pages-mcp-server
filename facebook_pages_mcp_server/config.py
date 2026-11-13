@@ -21,6 +21,7 @@ clients must present to reach this server. It is unrelated to Facebook.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,10 +31,14 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 SERVER_NAME = "facebook-pages-mcp-server"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 
-DEFAULT_GRAPH_VERSION = "v25.0"
+DEFAULT_GRAPH_VERSION = "v27.0"
 DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com"
+
+# A Graph API version path segment is "v", a major and a minor. Graph rejects a
+# bare major such as ``v27``.
+_VERSION_RE = re.compile(r"^v\d+\.\d+$")
 
 # Environment variable names
 ENV_PAGE_TOKEN = "FB_PAGE_TOKEN"
@@ -144,14 +149,14 @@ def _env_permissions(name: str) -> tuple[str, ...]:
 
 
 def _normalize_version(value: str) -> str:
-    """Accept ``25.0`` or ``v25.0``; the Graph API path segment needs the ``v``."""
+    """Accept ``27.0`` or ``v27.0``; the Graph API path segment needs the ``v``."""
     value = value.strip().lstrip("/")
     if not value.startswith("v"):
         value = f"v{value}"
-    if len(value) < 2 or not value[1:2].isdigit():
+    if not _VERSION_RE.fullmatch(value):
         raise ConfigError(
             f"{ENV_GRAPH_VERSION} must look like a Graph API version "
-            f"(e.g. v25.0), got {value!r}."
+            f"(e.g. v27.0), got {value!r}."
         )
     return value
 
@@ -185,7 +190,7 @@ class Config:
 
     @property
     def api_root(self) -> str:
-        """Base URL for versioned Graph API calls, e.g. ``https://graph.facebook.com/v25.0``."""
+        """Base URL for versioned Graph API calls, e.g. ``https://graph.facebook.com/v27.0``."""
         return f"{self.graph_base_url.rstrip('/')}/{self.graph_version}"
 
     def token_for(self, scope: str) -> str:

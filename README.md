@@ -8,7 +8,8 @@ photos, videos, events, Messenger conversations and Page Insights. If you allow
 it, it can also publish posts, comment, upload media, and delete content.
 
 Built on the [MCP Python SDK](https://py.sdk.modelcontextprotocol.io) (v2, `MCPServer`).
-Tested against Graph API `v25.0`; the version is configurable.
+Targets Graph API `v27.0`, the current version; any version can be selected with
+`FB_GRAPH_VERSION`.
 
 ## Disclaimer
 
@@ -62,6 +63,14 @@ Call `page_insights_metrics` to get a grouped list of names worth trying
 (`audience`, `engagement`, `followers`, `posts`, `reactions`, `video`, `media`,
 `monetization`), then pass them to `page_insights` with a `period` or
 `date_preset`. When a metric is unavailable the Graph error names it.
+
+Reach metrics (`page_impressions`, `post_impressions` and their paid, organic,
+viral and fan breakdowns) were retired by Meta around Graph API v26.0. Only
+total reach has a replacement: `page_total_media_view_unique` and
+`post_total_media_view_unique`. The other breakdowns are gone with no
+equivalent. The tool lists the retired names and their replacements under
+`retired_metrics` so it can answer "how many people saw this post?" with a
+metric that still works.
 
 Two constraints worth knowing before you build a report: Page Insights are only
 available for Pages with 100 or more likes, and most metrics update once per day.
@@ -123,6 +132,11 @@ never appears in `tools/list` and cannot be called.
 An app in *Development Mode* can only reach test users and Pages you own. That
 is fine for trying this out; it is the safest way to run it.
 
+A new app is created on the current Graph API version, and Meta issues its
+access tokens for that version. The default `FB_GRAPH_VERSION` matches it. If you
+pin an older version, set it to the one your app was created on; an app cannot
+issue tokens for a version older than itself.
+
 ### 2. Install
 
 ```bash
@@ -178,7 +192,7 @@ facebook-pages-mcp-server serve-http
 |---|---|---|
 | `FB_PAGE_TOKEN` | yes | Facebook Page access token. Every Page tool acts with it. Never a tool parameter. |
 | `FB_USER_TOKEN` | no | User access token for `me/accounts` (`pages_list`, `pages_find`). Unset means those calls use `FB_PAGE_TOKEN`. |
-| `FB_GRAPH_VERSION` | no | Graph API version (default `v25.0`). Accepts `v25.0` or `25.0`. |
+| `FB_GRAPH_VERSION` | no | Graph API version (default `v27.0`). Accepts `v27.0` or `27.0`; a bare major such as `v27` is rejected by the API. Set it to the version your app was created on. |
 | `FB_GRAPH_BASE_URL` | no | Graph API base URL (default `https://graph.facebook.com`). Change only for a test double or proxy. |
 | `MCP_API_KEY` | for `serve-http` | Bearer token(s) clients must present to use *this* MCP server. Comma-separated list supported. |
 | `MCP_HTTP_HOST` | no | Bind host for `serve-http` (default `127.0.0.1`). |
@@ -240,7 +254,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.0.0"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.1.0"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with

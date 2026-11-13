@@ -3,7 +3,7 @@
 Graph API overview (https://developers.facebook.com/docs/graph-api):
 
 - Base URL: ``{base}/{version}/{node-or-edge-path}``, e.g.
-  ``https://graph.facebook.com/v25.0/123/posts``.
+  ``https://graph.facebook.com/v27.0/123/posts``.
 - Auth: the access token rides in the ``Authorization: Bearer`` header, so it
   never appears in URLs or logs.
 - Errors: ``{"error": {"message", "type", "code", "error_subcode",
