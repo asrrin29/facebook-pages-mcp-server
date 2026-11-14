@@ -184,10 +184,10 @@ async def test_stdio_tool_list_and_calls(mock):
         data = _tool_text(
             await client.call_tool(
                 "page_insights",
-                {"page_id": "1001", "metrics": ["page_impressions"], "period": "day"},
+                {"page_id": "1001", "metrics": ["page_total_media_view_unique"], "period": "day"},
             )
         )
-        assert data["data"][0]["name"] == "page_impressions"
+        assert data["data"][0]["name"] == "page_total_media_view_unique"
 
         # an unknown metric surfaces the Graph error, naming the code
         result = await client.call_tool(
@@ -195,6 +195,11 @@ async def test_stdio_tool_list_and_calls(mock):
         )
         assert result.is_error
         assert "code=100" in result.content[0].text
+
+        # a metric the current version rejects is reported the same way
+        result = await client.call_tool("page_insights", {"page_id": "1001", "metrics": ["page_fans"]})
+        assert result.is_error
+        assert "page_fans" in result.content[0].text
 
         # metric reference
         data = _tool_text(await client.call_tool("page_insights_metrics", {"group": "engagement"}))
@@ -208,15 +213,17 @@ async def test_stdio_tool_list_and_calls(mock):
             metric for metrics in all_metrics["page_metrics_by_group"].values() for metric in metrics
         ] + all_metrics["post_metrics"]
         assert not [m for m in offered if m in all_metrics["retired_metrics"]]
-        assert all_metrics["retired_metrics"]["page_impressions"] == "page_total_media_view_unique"
+        assert all_metrics["retired_metrics"]["page_impressions"] == "page_media_view"
+        assert all_metrics["retired_metrics"]["page_fans"] == "page_follows"
 
-        # batch read: one call, two Graph requests
+        # batch read: one call, two Graph requests. Graph names the target of a
+        # batch entry relative_url, so that is what must reach the API.
         data = _tool_text(
             await client.call_tool(
                 "graph_batch",
                 {
                     "requests": [
-                        {"method": "GET", "relative_path": "1001/posts", "name": "posts"},
+                        {"method": "GET", "relative_url": "1001/posts", "name": "posts"},
                         {"method": "GET", "relative_path": "1002", "name": "other_page"},
                     ]
                 },
@@ -226,10 +233,80 @@ async def test_stdio_tool_list_and_calls(mock):
         assert data["results"][0]["code"] == 200
         assert json.loads(data["results"][0]["body"])["data"][0]["id"] == "1001_7001"
         assert data["results"][1]["body"] == json.dumps({"id": "1002"})
+        sent = mock_graph.find("batch")["entries"]
+        assert [e["relative_url"] for e in sent] == ["1001/posts", "1002"]
+        assert not [e for e in sent if "relative_path" in e]
+
+        # an entry with no target is rejected before any call is made
+        mock_graph.reset()
+        result = await client.call_tool("graph_batch", {"requests": [{"method": "GET"}]})
+        assert result.is_error
+        assert "relative_url" in result.content[0].text
+        assert mock_graph.REQUESTS == []
 
         # module discovery
         data = _tool_text(await client.call_tool("facebook_pages_list_tools", {}))
         assert {t["tool"] for t in data["tools"]} >= {"page_get", "page_publish", "comment_delete"}
+
+
+async def test_reported_failures_no_longer_occur(mock):
+    """One test per failure reported against a live Page, asserted on the request sent."""
+    env = _env(mock, MCP_TOOL_PERMISSIONS="read,write,delete")
+    async with Client(_server_params(env)) as client:
+        # 1. page_posts_list with its default fields must not ask for
+        #    attachments, which Graph rejects on that edge with error 12.
+        data = _tool_text(await client.call_tool("page_posts_list", {"page_id": "1001"}))
+        assert data["data"][0]["id"] == "1001_7001"
+        fields = mock_graph.find("1001/posts")["query"]["fields"]
+        assert "attachments" not in fields.split(",")
+
+        # 2. post_get must not name comments or likes twice when a caller adds
+        #    them through extra_fields; Graph answers that with error 2500.
+        data = _tool_text(
+            await client.call_tool(
+                "post_get",
+                {"post_id": "1001_7001", "extra_fields": ["comments", "likes", "shares"]},
+            )
+        )
+        assert data["id"] == "1001_7001"
+        sent_fields = mock_graph.find_last("1001_7001")["query"]["fields"].split(",")
+        names = [f.split(".", 1)[0] for f in sent_fields]
+        assert len(names) == len(set(names))
+        assert "attachments" in names
+
+        # 3. token_debug must name the token to inspect; Graph requires it.
+        data = _tool_text(await client.call_tool("token_debug", {}))
+        assert data["data"]["is_valid"] is True
+        assert mock_graph.find("debug_token")["query"]["input_token"] == mock_graph.VALID_TOKEN
+
+        # 4. graph_batch must send relative_url, the key Graph reads.
+        data = _tool_text(
+            await client.call_tool(
+                "graph_batch",
+                {"requests": [{"method": "GET", "relative_url": "1001"}]},
+            )
+        )
+        assert data["results"][0]["code"] == 200
+        assert mock_graph.find("batch")["entries"][0]["relative_url"] == "1001"
+
+        # 5. facebook_pages_status must report the version the calls in this
+        #    process actually use, not a version baked into an older build.
+        status = _tool_text(await client.call_tool("facebook_pages_status", {}))
+        assert status["graph_version"] == "v27.0"
+        assert status["graph_api_root"].endswith("/v27.0")
+        used = {r["version"] for r in mock_graph.REQUESTS if r.get("version")}
+        assert used == {status["graph_version"]}
+
+        # 6. The metric reference must not offer metrics the API rejects, and it
+        #    must offer the follower metrics that replaced the Page-likes ones.
+        metrics = _tool_text(await client.call_tool("page_insights_metrics", {}))
+        offered = [
+            m for group in metrics["page_metrics_by_group"].values() for m in group
+        ] + metrics["post_metrics"]
+        for rejected in ("page_fans", "page_fans_city", "page_impressions", "post_impressions"):
+            assert rejected not in offered
+            assert rejected in metrics["retired_metrics"]
+        assert "page_follows" in offered
 
 
 async def test_stdio_write_tools_change_data(mock):

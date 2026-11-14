@@ -42,7 +42,7 @@ whether a tool is registered at all. See [Tool permissions](#tool-permissions).
 | `page_conversations_list` | `GET /{page-id}/conversations` | read |
 | `conversation_messages_list` | `GET /{conversation-id}/messages` | read |
 | `token_debug` | `GET /debug_token` | read |
-| `graph_batch` | `POST /batch` | read (POST/DELETE entries need write/delete) |
+| `graph_batch` | `POST /{version}` with a `batch` parameter | read (POST/DELETE entries need write/delete) |
 | `graph_follow` | `GET <next_url>` | read |
 | `page_publish` | `POST /{page-id}/feed` | write |
 | `post_comment_create` | `POST /{post-id}/comments` | write |
@@ -64,16 +64,30 @@ Call `page_insights_metrics` to get a grouped list of names worth trying
 `monetization`), then pass them to `page_insights` with a `period` or
 `date_preset`. When a metric is unavailable the Graph error names it.
 
-Reach metrics (`page_impressions`, `post_impressions` and their paid, organic,
-viral and fan breakdowns) were retired by Meta around Graph API v26.0. Only
-total reach has a replacement: `page_total_media_view_unique` and
-`post_total_media_view_unique`. The other breakdowns are gone with no
-equivalent. The tool lists the retired names and their replacements under
-`retired_metrics` so it can answer "how many people saw this post?" with a
-metric that still works.
+Meta deprecated a large group of Page Insights metrics for every API version, in
+waves dated 2025-06-15 and 2025-11-15, and states a further wave for 2026-06-15.
+Two families matter here:
 
-Two constraints worth knowing before you build a report: Page Insights are only
-available for Pages with 100 or more likes, and most metrics update once per day.
+- Reach: `page_impressions`, `post_impressions` and their paid, organic, viral,
+  fan and non-viral breakdowns. Use `page_media_view` and `post_media_view` for
+  impressions, or the `*_total_media_view_unique` metrics for unique reach. The
+  paid breakdown is available as a breakdown on the media-view metrics.
+- Page likes: `page_fans`, `page_fans_city`, `page_fans_country` and
+  `page_fan_adds`. Use the follower metrics instead: `page_follows`,
+  `page_follows_city`, `page_follows_country`, `page_daily_follows` and
+  `page_daily_unfollows_unique`.
+
+The reference tables still print the deprecated names, so they are not a reliable
+guide. The list the API enforces is
+[Deprecated Facebook Page Insights Metrics](https://developers.facebook.com/documentation/pages-api/platforminsights/page/deprecated-metrics).
+One rejected metric fails the whole Insights request with error 100, which is why
+the tools never offer them. `page_insights_metrics` lists each name with its
+replacement under `retired_metrics`, so a question like "how many people saw this
+post?" is answered with a metric that still works.
+
+Three constraints worth knowing before you build a report: Page Insights are only
+available for Pages with 100 or more likes, most metrics update once per day, and
+a `since`/`until` range covers at most 90 days.
 
 ### Choosing fields
 
@@ -81,9 +95,18 @@ The Graph API returns only the `id` of a node unless you ask for fields. Each
 read tool therefore ships a default field set taken from the current reference.
 Pass `fields` to replace that set outright, or `extra_fields` to add to it.
 
-One behaviour to plan around: a field the API does not recognise fails the whole
-request with error 100 rather than returning nothing. The error names the field,
-so drop it and retry.
+Two behaviours to plan around:
+
+- A field the API does not recognise fails the whole request with error 100
+  rather than returning nothing. The error names the field, so drop it and retry.
+- Some fields are accepted on one endpoint and rejected on another. `attachments`
+  works on a single post node and fails the `/{page-id}/posts` edge with error
+  12, so the default for `page_posts_list` leaves it out and `post_get` includes
+  it. Read attachments one post at a time.
+
+The tools never send one field name twice. Graph reports a syntax error (2500)
+when `fields` and `extra_fields` name the same field, so a name already present
+is not repeated.
 
 ### Pagination
 
@@ -254,7 +277,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.1.0"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.2.0"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with
@@ -284,6 +307,25 @@ plain HTTP.
 ```bash
 docker run --rm -i --env-file .env facebook-pages-mcp-server serve
 ```
+
+## Troubleshooting
+
+**The server reports an unexpected Graph API version.** A process keeps the
+configuration it read at start, so a server that is still running after you
+changed `.env` or reinstalled the package keeps answering with the old values.
+Restart it. The startup line and `facebook_pages_status` both name the version in
+use, so compare them with `FB_GRAPH_VERSION`. If you installed with `pip install .`
+rather than `pip install -e .`, a later source edit is not picked up until you
+install again.
+
+**Insights return an invalid-metric error (code 100).** One unsupported metric
+fails the whole request. Call `page_insights_metrics` and read `retired_metrics`
+for the replacement. The list Meta enforces is linked under "Reading Page
+Insights" above; the reference tables still print deprecated names.
+
+**A read fails on a field you did not ask for.** Drop the field named in the
+error, or pass your own `fields`. Some fields are valid on one endpoint and not
+another, as described under "Choosing fields".
 
 ## Development
 

@@ -130,7 +130,7 @@ class GraphClient:
     async def batch(self, entries: list[dict[str, Any]]) -> Any:
         """Run a batch of requests in one call to the version root.
 
-        ``entries`` is the Graph batch array (``{"method": "GET", "relative_path":
+        ``entries`` is the Graph batch array (``{"method": "GET", "relative_url":
         "..."}``). Sent as form data because the batch parameter must be
         form-encoded, not a JSON body.
         """

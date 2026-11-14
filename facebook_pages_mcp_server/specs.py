@@ -68,6 +68,11 @@ PAGE_FIELDS: tuple[str, ...] = (
 # so it is not requested.
 PAGE_SUMMARY_FIELDS: tuple[str, ...] = ("id", "name", "link", "username", "category")
 
+# Fields for the /{page-id}/posts edge. `attachments` is left out: on this edge
+# Graph resolves it through a legacy aggregated-attachments path and the whole
+# request fails with error 12 ("deprecate_post_aggregated_fields_for_attachement
+# is deprecated for versions v3.3 and higher"). Read it from a single post node
+# instead, with post_get or extra_fields.
 POST_FIELDS: tuple[str, ...] = (
     "id",
     "message",
@@ -77,7 +82,6 @@ POST_FIELDS: tuple[str, ...] = (
     "permalink_url",
     "link",
     "full_picture",
-    "attachments",
     "shares",
     "comments.summary(true).filter(toplevel).limit(3)",
     "reactions.summary(true)",
@@ -85,6 +89,9 @@ POST_FIELDS: tuple[str, ...] = (
     "is_published",
     "with_tags",
 )
+
+# Fields for a single post node, where `attachments` is accepted.
+POST_DETAIL_FIELDS: tuple[str, ...] = (*POST_FIELDS, "attachments")
 
 COMMENT_FIELDS: tuple[str, ...] = (
     "id",
@@ -165,19 +172,26 @@ MESSAGE_FIELDS: tuple[str, ...] = (
     "sticker",
 )
 
-# A starter list of Page Insights metrics. Meta changes this list often and
-# deprecates metrics by API version, so treat it as a starting point and let
-# the API report an invalid-metric error rather than trusting this list. Reach
-# metrics are excluded here and listed in RETIRED_INSIGHTS_METRICS below.
+# Page Insights metrics worth asking for. Every name here is absent from Meta's
+# deprecated-metrics list, which is what the API enforces:
+# https://developers.facebook.com/documentation/pages-api/platforminsights/page/deprecated-metrics
+# The reference tables still print deprecated names, so they cannot be trusted.
+# One rejected metric fails the whole Insights request with error 100.
 INSIGHTS_METRICS: dict[str, tuple[str, ...]] = {
-    "audience": ("page_fans", "page_fan_adds", "page_fan_removes", "page_fans_country", "page_fans_city"),
+    "audience": ("page_follows", "page_follows_city", "page_follows_country"),
     "engagement": (
         "page_post_engagements",
         "page_total_actions",
         "page_views_total",
     ),
-    "followers": ("page_daily_follows", "page_daily_unfollows_unique", "page_lifetime_engaged_followers_unique"),
-    "posts": ("post_clicks", "post_activity_by_action_type"),
+    "followers": (
+        "page_daily_follows",
+        "page_daily_follows_unique",
+        "page_daily_unfollows_unique",
+        "page_fan_adds_by_paid_non_paid_unique",
+        "page_lifetime_engaged_followers_unique",
+    ),
+    "posts": ("post_clicks", "post_clicks_by_type", "post_activity_by_action_type"),
     "reactions": (
         "page_actions_post_reactions_total",
         "page_actions_post_reactions_like_total",
@@ -195,29 +209,56 @@ INSIGHTS_METRICS: dict[str, tuple[str, ...]] = {
     "monetization": ("content_monetization_earnings", "monetization_approximate_earnings"),
 }
 
-# Meta retired the reach metrics (``*_impressions*``) around Graph API v26.0.
-# Only total reach has a replacement; the paid, viral, non-viral, fan and
-# organic breakdowns are gone with no equivalent. They are listed here so the
-# discovery tool can name a replacement instead of offering a metric that fails
-# the whole Insights request.
+# Metrics the API rejects, copied from Meta's deprecated-metrics list. A rejected
+# metric fails the entire Insights request, so none of these are offered; the
+# discovery tool reports each with the replacement Meta names.
+#
+# Deprecated 2025-06-15: the unique reach metrics and the per-post impression
+# breakdowns. Deprecated 2025-11-15: the Page-likes metrics and the remaining
+# impressions metrics. The reference pages also mention a further set deprecated
+# on 2026-06-15, which is not published; re-check the list when Insights calls
+# start failing.
 RETIRED_INSIGHTS_METRICS: dict[str, str] = {
-    "page_impressions": "page_total_media_view_unique",
+    # Page and post reach.
+    "page_impressions": "page_media_view",
     "page_impressions_unique": "page_total_media_view_unique",
-    "page_impressions_paid": "",
+    "page_impressions_paid": "page_media_view with the is_from_ads breakdown",
     "page_impressions_paid_unique": "",
+    "page_impressions_viral": "",
     "page_impressions_viral_unique": "",
+    "page_impressions_nonviral": "",
     "page_impressions_nonviral_unique": "",
     "page_posts_impressions": "",
+    "page_posts_impressions_unique": "",
     "page_posts_impressions_paid": "",
-    "post_impressions": "post_total_media_view_unique",
+    "page_posts_impressions_paid_unique": "",
+    "page_posts_impressions_organic_unique": "",
+    "page_posts_served_impressions_organic_unique": "",
+    "page_posts_impressions_viral": "",
+    "page_posts_impressions_viral_unique": "",
+    "page_posts_impressions_nonviral": "",
+    "page_posts_impressions_nonviral_unique": "",
+    "post_impressions": "post_media_view",
     "post_impressions_unique": "post_total_media_view_unique",
-    "post_impressions_paid": "",
+    "post_impressions_paid": "post_media_view with the is_from_ads breakdown",
     "post_impressions_paid_unique": "",
+    "post_impressions_fan": "post_media_view with the is_from_followers breakdown",
+    "post_impressions_fan_unique": "",
     "post_impressions_organic": "",
     "post_impressions_organic_unique": "",
-    "post_impressions_fan_unique": "",
+    "post_impressions_viral": "",
     "post_impressions_viral_unique": "",
+    "post_impressions_nonviral": "",
     "post_impressions_nonviral_unique": "",
+    # Page likes, replaced by the follower metrics.
+    "page_fans": "page_follows",
+    "page_fans_locale": "",
+    "page_fans_city": "page_follows_city",
+    "page_fans_country": "page_follows_country",
+    "page_fan_adds": "",
+    "page_fan_adds_unique": "",
+    "page_fan_removes": "",
+    "page_fan_removes_unique": "",
 }
 
 POST_INSIGHTS_METRICS: tuple[str, ...] = (
@@ -226,8 +267,31 @@ POST_INSIGHTS_METRICS: tuple[str, ...] = (
     "post_clicks",
     "post_clicks_by_type",
     "post_reactions_by_type_total",
+    "post_reactions_like_total",
     "post_video_views",
     "post_activity_by_action_type",
+)
+
+# Accepted values for the Insights ``period`` and ``date_preset`` parameters.
+INSIGHTS_PERIODS: tuple[str, ...] = ("day", "week", "days_28", "month", "lifetime", "total_over_range")
+INSIGHTS_DATE_PRESETS: tuple[str, ...] = (
+    "today",
+    "yesterday",
+    "last_3d",
+    "last_7d",
+    "last_14d",
+    "last_28d",
+    "last_30d",
+    "last_90d",
+    "this_week_mon_today",
+    "last_week_mon_sun",
+    "this_month",
+    "last_month",
+    "this_quarter",
+    "last_quarter",
+    "this_year",
+    "last_year",
+    "data_maximum",
 )
 
 
@@ -416,8 +480,13 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         api="POST batch",
         description=(
             "Run a batch of Graph API requests in one call to save round trips. Each entry "
-            "is {method, relative_path, name}. GET entries are always allowed; POST and "
-            "DELETE entries need the write permission."
+            "is {method, relative_url, name}, where relative_url is a Graph path such as "
+            "'1001/posts'. GET entries are always allowed; POST and DELETE entries need the "
+            "write permission."
+        ),
+        notes=(
+            "A batch entry without relative_url has no target, and Graph answers it as a "
+            "request on the version root: 'Unsupported get request'."
         ),
     ),
     # ---------------- write ----------------
@@ -526,20 +595,34 @@ def spec_by_name(name: str) -> ToolSpec | None:
     return None
 
 
+def _field_name(field: str) -> str:
+    """Return the field name Graph checks for duplicates.
+
+    ``comments.summary(true).filter(toplevel)`` and ``comments`` name the same
+    field, so Graph reports a syntax error (code 2500) when both appear.
+    """
+    return field.split(".", 1)[0].strip()
+
+
 def join_fields(defaults: tuple[str, ...], fields: list[str] | None, extra_fields: list[str] | None) -> str:
     """Build the Graph ``fields`` parameter.
 
     ``fields`` replaces the defaults outright. ``extra_fields`` adds to them.
-    Order is preserved and duplicates are dropped, because the Graph API
-    rejects nothing but silently returns less useful payloads when the caller
-    asks twice.
+
+    Graph allows one entry per field name, so a name that already appears is not
+    repeated. The entry already present wins, because it carries the subfields and
+    modifiers this server chose (a comment summary, for example), and a bare name
+    would ask for less.
     """
     chosen = list(fields) if fields else list(defaults)
     if extra_fields:
         chosen.extend(extra_fields)
-    seen: list[str] = []
+    selected: list[str] = []
+    names: set[str] = set()
     for item in chosen:
         item = item.strip()
-        if item and item not in seen:
-            seen.append(item)
-    return ",".join(seen)
+        name = _field_name(item)
+        if item and name and name not in names:
+            names.add(name)
+            selected.append(item)
+    return ",".join(selected)

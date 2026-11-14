@@ -44,11 +44,14 @@ from .specs import (
     CONVERSATION_FIELDS,
     EVENT_FIELDS,
     HELPER_TOOL_SPECS,
+    INSIGHTS_DATE_PRESETS,
     INSIGHTS_METRICS,
+    INSIGHTS_PERIODS,
     MESSAGE_FIELDS,
     PAGE_FIELDS,
     PAGE_SUMMARY_FIELDS,
     PHOTO_FIELDS,
+    POST_DETAIL_FIELDS,
     POST_FIELDS,
     POST_INSIGHTS_METRICS,
     RETIRED_INSIGHTS_METRICS,
@@ -283,7 +286,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         extra_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         nid = _require(post_id, "post_id")
-        params = {"fields": join_fields(POST_FIELDS, fields, extra_fields)}
+        params = {"fields": join_fields(POST_DETAIL_FIELDS, fields, extra_fields)}
         return await state.call(lambda c: c.get(nid, params))
 
     async def post_comments_list(
@@ -357,22 +360,15 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
                 name: (replacement or "no replacement")
                 for name, replacement in RETIRED_INSIGHTS_METRICS.items()
             },
-            "periods": ["day", "week", "days_28", "lifetime", "total_over_range"],
-            "date_presets": [
-                "last_7d",
-                "last_28d",
-                "last_30d",
-                "last_90d",
-                "this_month",
-                "last_month",
-                "this_year",
-                "last_year",
-                "lifetime",
-            ],
+            "periods": list(INSIGHTS_PERIODS),
+            "date_presets": list(INSIGHTS_DATE_PRESETS),
             "note": (
-                "Meta deprecates metrics by API version, and Pages under 100 likes return "
-                "no insights. A retired metric fails the whole request, so do not add one "
-                "from retired_metrics; use its replacement instead."
+                "Pages under 100 likes return no insights. A retired metric fails the whole "
+                "request, so do not add one from retired_metrics; use its replacement "
+                "instead. Insights cover at most 90 days per since/until range, and "
+                "demographic metrics need data for at least 100 people. "
+                "https://developers.facebook.com/documentation/pages-api/platforminsights/"
+                "page/deprecated-metrics is the list the API enforces."
             ),
         }
 
@@ -478,17 +474,30 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         return _edge(payload)
 
     async def token_debug(input_token: str | None = None) -> dict[str, Any]:
-        params: dict[str, Any] = {}
-        if input_token:
-            params["input_token"] = input_token
-        return await state.call(lambda c: c.get("debug_token", params))
+        # Graph requires input_token; without it the call always fails. The
+        # configured token is the default subject, so callers rarely pass one.
+        subject = (input_token or "").strip() or config.page_token
+        if not subject:
+            raise ToolError(
+                "input_token is required and no FB_PAGE_TOKEN is configured to inspect instead."
+            )
+        return await state.call(lambda c: c.get("debug_token", {"input_token": subject}))
 
     async def graph_batch(requests: list[dict[str, Any]]) -> Any:
-        entries = [e for e in (requests or []) if isinstance(e, dict) and e.get("relative_path")]
-        if not entries:
-            raise ToolError("requests must be a list of {method, relative_path, name} objects.")
-        for entry in entries:
-            method = str(entry.get("method", "GET")).upper()
+        # Graph names the target of a batch entry `relative_url`. An entry that
+        # names anything else has no target, and Graph answers it as a request on
+        # the version root: "Unsupported get request".
+        entries: list[dict[str, Any]] = []
+        for raw in requests or []:
+            if not isinstance(raw, dict):
+                raise ToolError("each batch entry must be an object with method and relative_url.")
+            target = str(raw.get("relative_url") or raw.get("relative_path") or "").strip()
+            if not target:
+                raise ToolError(
+                    "each batch entry needs a relative_url, the Graph path to fetch "
+                    "(for example '1001/posts')."
+                )
+            method = str(raw.get("method", "GET")).upper()
             if method not in ("GET", "POST", "DELETE"):
                 raise ToolError(f"unsupported method {method!r} in a batch entry.")
             needed = "delete" if method == "DELETE" else "write"
@@ -497,6 +506,13 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
                     f"a {method} batch entry needs the {needed} permission "
                     f"(MCP_TOOL_PERMISSIONS={','.join(config.tool_permissions) or '<none>'})."
                 )
+            entry = dict(raw)
+            entry.pop("relative_path", None)
+            entry["method"] = method
+            entry["relative_url"] = target.lstrip("/")
+            entries.append(entry)
+        if not entries:
+            raise ToolError("requests must be a non-empty list of batch entry objects.")
         # Graph returns a bare JSON array here. Wrapping it keeps the tool
         # result an object, which MCP clients and the SDK handle consistently.
         results = await state.call(lambda c: c.batch(entries))
@@ -615,6 +631,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         info: dict[str, Any] = {
             "graph_api_root": cfg.api_root,
             "graph_version": cfg.graph_version,
+            "server_version": SERVER_VERSION,
             "page_token_configured": bool(cfg.page_token),
             "user_token_configured": bool(cfg.user_token),
             "tool_permissions": list(cfg.tool_permissions),
@@ -624,7 +641,9 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         }
         if ping:
             try:
-                payload = await state.call(lambda c: c.get("debug_token", {}))
+                payload = await state.call(
+                    lambda c: c.get("debug_token", {"input_token": cfg.page_token})
+                )
                 data = payload.get("data", payload) if isinstance(payload, dict) else payload
                 info["ping"] = {"ok": True, "token": data}
             except ToolError as exc:

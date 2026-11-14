@@ -68,6 +68,18 @@ DEBUG_TOKEN = {
     }
 }
 
+# Metrics the API rejects on the current version. One rejected metric fails the
+# whole Insights request, so the mock applies the same rule.
+REJECTED_INSIGHTS_METRICS = {
+    "page_fans",
+    "page_fan_adds",
+    "page_fan_removes",
+    "page_impressions",
+    "page_impressions_unique",
+    "post_impressions",
+    "post_impressions_unique",
+}
+
 # Every request the server made, so tests can assert on paths and parameters.
 REQUESTS: list[dict[str, Any]] = []
 
@@ -105,6 +117,28 @@ def _graph_error(message: str, code: int, error_type: str = "GraphMethodExceptio
     )
 
 
+# Graph rejects a fields parameter that names one field twice, so the mock checks
+# it the same way.
+def _duplicate_field(fields: str) -> str | None:
+    seen: set[str] = set()
+    for item in fields.split(","):
+        name = item.split(".", 1)[0].strip()
+        if name and name in seen:
+            return name
+        seen.add(name)
+    return None
+
+
+def _check_fields(request: Request) -> JSONResponse | None:
+    """Apply the field rules the Graph API enforces on post and token reads."""
+    fields = request.query_params.get("fields", "")
+    if duplicate := _duplicate_field(fields):
+        return _graph_error(
+            f"Syntax error in field matching {duplicate}.", 2500, "OAuthException"
+        )
+    return None
+
+
 def _check_auth(request: Request, *, user_ok: bool = False) -> JSONResponse | None:
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
@@ -140,6 +174,9 @@ async def _dispatch(request: Request) -> JSONResponse:
             "path": rest,
             "method": method,
             "query": dict(request.query_params),
+            # The version segment the client actually requested, so a test can
+            # compare it with the version the server reports.
+            "version": version,
         }
     )
 
@@ -166,8 +203,25 @@ async def _dispatch(request: Request) -> JSONResponse:
         REQUESTS[-1]["entries"] = entries
         results = []
         for entry in entries:
-            entry_path = entry["relative_path"]
-            if entry.get("method", "GET").upper() == "GET" and entry_path.endswith("/posts"):
+            # Graph names the target of an entry relative_url. An entry without it
+            # addresses the version root, which is not a readable object.
+            entry_path = entry.get("relative_url", "")
+            if not entry_path:
+                results.append(
+                    {
+                        "code": 400,
+                        "body": json.dumps(
+                            {
+                                "error": {
+                                    "message": "Unsupported get request. Object with ID '' does not exist.",
+                                    "type": "GraphMethodException",
+                                    "code": 100,
+                                }
+                            }
+                        ),
+                    }
+                )
+            elif entry.get("method", "GET").upper() == "GET" and entry_path.endswith("/posts"):
                 results.append({"code": 200, "body": json.dumps({"data": POSTS})})
             else:
                 results.append({"code": 200, "body": json.dumps({"id": entry_path.split("/")[0]})})
@@ -178,6 +232,11 @@ async def _dispatch(request: Request) -> JSONResponse:
         global _rate_limited_calls
         if err := _check_auth(request, user_ok=True):
             return err
+        # Graph names the token to inspect with input_token and fails without it.
+        if not request.query_params.get("input_token"):
+            return _graph_error(
+                "Missing required parameter: input_token must be provided.", 100, "OAuthException"
+            )
         if _rate_limited_calls > 0:
             _rate_limited_calls -= 1
             return _graph_error("Application total call limit exceeded.", 4, "OAuthException")
@@ -240,17 +299,34 @@ async def _dispatch(request: Request) -> JSONResponse:
     if err := _check_auth(request, user_ok=segments[0] == "me"):
         return err
 
+    if fields_error := _check_fields(request):
+        return fields_error
+
+    if segments[-1] == "posts" and "attachments" in request.query_params.get("fields", ""):
+        # On the /{page-id}/posts edge Graph resolves attachments through a
+        # legacy aggregated path and rejects the whole request.
+        return _graph_error(
+            "(#12) deprecate_post_aggregated_fields_for_attachement is deprecated "
+            "for versions v3.3 and higher.",
+            12,
+            "OAuthException",
+        )
+
     if segments[-1] == "insights":
         metric = request.query_params.get("metric", "")
         if "not_a_real_metric" in metric:
             return _graph_error("(#100) The metric you requested is not supported.", 100)
+        rejected = [name for name in metric.split(",") if name.strip() in REJECTED_INSIGHTS_METRICS]
+        if rejected:
+            return _graph_error(
+                f"(#100) The metric you requested is not supported: {rejected[0]}.", 100)
         if "_" in segments[0]:  # a post id looks like {page_id}_{recipient_id}
-            return JSONResponse({"data": [{"name": "post_impressions", "values": [{"value": 512}]}]})
+            return JSONResponse({"data": [{"name": "post_total_media_view_unique", "values": [{"value": 512}]}]})
         return JSONResponse(
             {
                 "data": [
                     {
-                        "name": "page_impressions",
+                        "name": "page_total_media_view_unique",
                         "period": "day",
                         "values": [{"value": 1200, "end_time": "2026-11-08T23:00:00-0800"}],
                         "total_value": {"value": 1200},

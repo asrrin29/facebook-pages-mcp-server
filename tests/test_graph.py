@@ -15,7 +15,15 @@ from facebook_pages_mcp_server.config import (
     load_config,
 )
 from facebook_pages_mcp_server.graph import GraphClient, GraphError
-from facebook_pages_mcp_server.specs import PAGE_FIELDS, join_fields
+from facebook_pages_mcp_server.specs import (
+    INSIGHTS_METRICS,
+    PAGE_FIELDS,
+    POST_DETAIL_FIELDS,
+    POST_INSIGHTS_METRICS,
+    POST_FIELDS,
+    RETIRED_INSIGHTS_METRICS,
+    join_fields,
+)
 from tests import mock_graph
 
 MOCK_ORIGIN = "https://graph.example.test"
@@ -157,6 +165,34 @@ def test_join_fields_replaces_defaults_when_fields_given():
     assert out == "id,name"
 
 
+def test_join_fields_keeps_one_entry_per_field_name():
+    # Graph allows one entry per field name; a second entry for the same name is
+    # a syntax error (code 2500). The entry already present wins because it
+    # carries the modifiers this server chose.
+    out = join_fields(
+        ("comments.summary(true).filter(toplevel).limit(3)", "likes.summary(true)"),
+        None,
+        ["comments", "likes", "shares"],
+    )
+    assert out == "comments.summary(true).filter(toplevel).limit(3),likes.summary(true),shares"
+
+
+def test_offered_insights_metrics_are_not_retired():
+    # One rejected metric fails the whole Insights request, so the catalog must
+    # never offer a name that the API rejects.
+    offered = [m for group in INSIGHTS_METRICS.values() for m in group] + list(POST_INSIGHTS_METRICS)
+    assert not [m for m in offered if m in RETIRED_INSIGHTS_METRICS]
+    # The mock rejects the names a live Page was observed rejecting.
+    assert mock_graph.REJECTED_INSIGHTS_METRICS <= set(RETIRED_INSIGHTS_METRICS)
+
+
+def test_post_list_fields_omit_attachments():
+    # On the /{page-id}/posts edge `attachments` fails the whole request with
+    # Graph error 12, so the list default must not include it.
+    assert "attachments" not in POST_FIELDS
+    assert "attachments" in POST_DETAIL_FIELDS
+
+
 def test_join_fields_drops_duplicates_and_blanks():
     out = join_fields(("id",), ["id", " name ", ""], ["id", "link"])
     assert out == "id,name,link"
@@ -223,7 +259,7 @@ async def test_retryable_error_code_is_retried(graph):
     """Graph error code 4 (app rate limit) is retried, then the call succeeds."""
     mock_graph.reset(rate_limited_calls=1)
     async with GraphClient(_config(graph_base_url=graph.base_url, max_retries=1)) as client:
-        payload = await client.get("debug_token")
+        payload = await client.get("debug_token", {"input_token": "mock-page-token"})
     assert payload["data"]["is_valid"] is True
     assert len([r for r in mock_graph.REQUESTS if r.get("path") == "debug_token"]) == 2
 
@@ -241,17 +277,17 @@ async def test_rate_limit_surfaces_when_retries_run_out(graph):
     mock_graph.reset(rate_limited_calls=3)
     async with GraphClient(_config(graph_base_url=graph.base_url, max_retries=1)) as client:
         with pytest.raises(GraphError) as excinfo:
-            await client.get("debug_token")
+            await client.get("debug_token", {"input_token": "mock-page-token"})
     assert excinfo.value.code == 4
 
 
 async def test_batch_sends_json_in_form_field(graph):
     async with GraphClient(_config(graph_base_url=graph.base_url)) as client:
-        results = await client.batch([{"method": "GET", "relative_path": "1001/posts"}])
+        results = await client.batch([{"method": "GET", "relative_url": "1001/posts"}])
     assert isinstance(results, list)
     assert results[0]["code"] == 200
     assert json.loads(results[0]["body"])["data"][0]["id"] == "1001_7001"
-    assert mock_graph.find("batch")["entries"][0]["relative_path"] == "1001/posts"
+    assert mock_graph.find("batch")["entries"][0]["relative_url"] == "1001/posts"
 
 
 async def test_get_url_follows_absolute_pagination_link(graph):

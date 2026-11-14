@@ -76,7 +76,8 @@ async def _cmd_check(config: Config) -> int:
     print("Pinging the Graph API (debug_token)...")
     async with GraphClient(config) as client:
         try:
-            payload = await client.get("debug_token", {})
+            # Graph requires input_token; the configured token is the subject.
+            payload = await client.get("debug_token", {"input_token": config.page_token})
         except GraphError as exc:
             print(f"  FAILED: {exc}", file=sys.stderr)
             if exc.code == 190:
@@ -157,9 +158,11 @@ def _run_http(config: Config) -> int:
         middleware=[Middleware(BearerAuthMiddleware)],
     )
 
+    # The Graph API version is fixed when the process starts, so naming it here
+    # shows which build a running server came from.
     print(
         f"{SERVER_NAME} {__version__} listening on http://{config.http_host}:{config.http_port}/mcp "
-        f"({len(valid_keys)} API key(s) configured)",
+        f"({len(valid_keys)} API key(s) configured, Graph API {config.graph_version})",
         file=sys.stderr,
     )
     uvicorn.run(app, host=config.http_host, port=config.http_port, log_level="info")
