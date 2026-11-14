@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 try:  # optional, only needed for .env file support
@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 SERVER_NAME = "facebook-pages-mcp-server"
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.3.0"
 
 DEFAULT_GRAPH_VERSION = "v27.0"
 DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com"
@@ -226,6 +226,16 @@ class Config:
                 f"Missing required environment variable {ENV_MCP_API_KEY}. "
                 "Generate one with: facebook-pages-mcp-server gen-key"
             )
+
+    def with_token(self, scope: str, token: str) -> "Config":
+        """A copy of this configuration that uses ``token`` for calls of ``scope``.
+
+        A Page token taken from a short-lived user token expires within a day.
+        A replacement can be supplied while the server runs, rather than by
+        editing the environment and restarting.
+        """
+        field = "user_token" if scope == "user" else "page_token"
+        return replace(self, **{field: token})
 
 
 def load_config() -> Config:

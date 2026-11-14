@@ -22,6 +22,12 @@ from starlette.routing import Route
 
 VALID_TOKEN = "mock-page-token"
 VALID_USER_TOKEN = "mock-user-token"
+# A Page token taken from a long-lived user token: debug_token reports no expiry.
+FRESH_TOKEN = "mock-fresh-page-token"
+# A token whose session has ended. Graph rejects it on every endpoint.
+EXPIRED_TOKEN = "mock-expired-page-token"
+
+ACCEPTED_TOKENS = {VALID_TOKEN, FRESH_TOKEN}
 
 PAGES = [
     {
@@ -68,6 +74,10 @@ DEBUG_TOKEN = {
     }
 }
 
+# A Page token from a long-lived user token has no expiry, which debug_token
+# reports as expires_at 0.
+DEBUG_TOKEN_NO_EXPIRY = {**DEBUG_TOKEN, "data": {**DEBUG_TOKEN["data"], "expires_at": 0}}
+
 # Metrics the API rejects on the current version. One rejected metric fails the
 # whole Insights request, so the mock applies the same rule.
 REJECTED_INSIGHTS_METRICS = {
@@ -110,11 +120,17 @@ def find_last(path: str) -> dict[str, Any] | None:
     return None
 
 
-def _graph_error(message: str, code: int, error_type: str = "GraphMethodException") -> JSONResponse:
-    return JSONResponse(
-        {"error": {"message": message, "type": error_type, "code": code, "fbtrace_id": "MockTrace"}},
-        status_code=400,
-    )
+def _graph_error(
+    message: str,
+    code: int,
+    error_type: str = "GraphMethodException",
+    subcode: int | None = None,
+) -> JSONResponse:
+    error: dict[str, Any] = {"message": message, "type": error_type, "code": code, "fbtrace_id": "MockTrace"}
+    if subcode is not None:
+        error["error_subcode"] = subcode
+    status = 401 if code == 190 else 400
+    return JSONResponse({"error": error}, status_code=status)
 
 
 # Graph rejects a fields parameter that names one field twice, so the mock checks
@@ -144,8 +160,19 @@ def _check_auth(request: Request, *, user_ok: bool = False) -> JSONResponse | No
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not token:
         return _graph_error("An access token is required for this request.", 104, "OAuthException")
-    if token == VALID_TOKEN or (user_ok and token == VALID_USER_TOKEN):
+    if token in ACCEPTED_TOKENS or (user_ok and token == VALID_USER_TOKEN):
         return None
+    if token == EXPIRED_TOKEN:
+        # Graph reports an expired session as code 190 subcode 463, and states the
+        # expiry in the message text rather than in a field.
+        return _graph_error(
+            "Error validating access token: Session has expired on Friday, "
+            "13-Nov-26 14:00:00 PST. The current time is Saturday, 14-Nov-26 "
+            "09:53:26 PST.",
+            190,
+            "OAuthException",
+            subcode=463,
+        )
     return _graph_error("Invalid OAuth access token - cannot parse it.", 190, "OAuthException")
 
 
@@ -177,6 +204,9 @@ async def _dispatch(request: Request) -> JSONResponse:
             # The version segment the client actually requested, so a test can
             # compare it with the version the server reports.
             "version": version,
+            # The bearer token the call was authenticated with, so a test can
+            # confirm which token a run-time change put into use.
+            "headers": {"authorization": request.headers.get("authorization", "")},
         }
     )
 
@@ -240,6 +270,8 @@ async def _dispatch(request: Request) -> JSONResponse:
         if _rate_limited_calls > 0:
             _rate_limited_calls -= 1
             return _graph_error("Application total call limit exceeded.", 4, "OAuthException")
+        if request.query_params.get("input_token") == FRESH_TOKEN:
+            return JSONResponse(DEBUG_TOKEN_NO_EXPIRY)
         return JSONResponse(DEBUG_TOKEN)
 
     # ---------------- node writes ----------------

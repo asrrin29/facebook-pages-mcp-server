@@ -28,6 +28,7 @@ from .config import (
     load_config,
 )
 from .server import build_server
+from .tokens import describe_token_error, token_state
 
 
 def _setup_logging() -> None:
@@ -80,17 +81,28 @@ async def _cmd_check(config: Config) -> int:
             payload = await client.get("debug_token", {"input_token": config.page_token})
         except GraphError as exc:
             print(f"  FAILED: {exc}", file=sys.stderr)
-            if exc.code == 190:
-                print("  The token is invalid, expired, or was issued to another app.", file=sys.stderr)
-            elif exc.code in (10, 200):
-                print("  The token lacks a permission this call needs, or the app is not approved.", file=sys.stderr)
+            explanation = describe_token_error(exc) or (
+                "The token lacks a permission this call needs, or the app is not approved."
+                if exc.code in (10, 200)
+                else ""
+            )
+            if explanation:
+                print(f"  {explanation}", file=sys.stderr)
             return 1
-    data = payload.get("data", {}) if isinstance(payload, dict) else {}
-    print(
-        f"  OK: app={data.get('app')!r} scopes={len(data.get('scopes', []))} "
-        f"expires_at={data.get('expires_at')!r}"
-    )
-    return 0
+
+    # The expiry is reported in plain terms: a token that dies within a day is
+    # the failure that looks like a bug in everything else.
+    state = token_state(payload)
+    kind = state["type"] or "unknown"
+    print(f"  OK: type={kind} app={state['app_id']!r} scopes={len(state['scopes'])}")
+    if state["never_expires"]:
+        print("  Expiry: none (this token does not expire)")
+    else:
+        verdict = "EXPIRED" if state["expired"] else f"expires in {state['days_left']} day(s)"
+        print(f"  Expiry: {state['expires_at_utc']} ({verdict})")
+    if state.get("note"):
+        print(f"  NOTE: {state['note']}", file=sys.stderr)
+    return 1 if state["expired"] else 0
 
 
 def _run_stdio(config: Config) -> int:

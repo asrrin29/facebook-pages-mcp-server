@@ -121,6 +121,7 @@ READ_ONLY_TOOLS = {
     "graph_batch",
     "graph_follow",
     "facebook_pages_status",
+    "facebook_pages_set_token",
     "facebook_pages_list_tools",
 }
 
@@ -132,6 +133,7 @@ async def test_stdio_tool_list_and_calls(mock):
         names = {t.name for t in tools.tools}
         expected = {
             "facebook_pages_status",
+            "facebook_pages_set_token",
             "facebook_pages_list_tools",
             "pages_list",
             "page_get",
@@ -147,13 +149,19 @@ async def test_stdio_tool_list_and_calls(mock):
             "post_delete",
         }
         assert expected <= names, f"missing tools: {expected - names}"
-        assert len(names) == 27  # 25 Graph tools + 2 helpers
+        assert len(names) == 28  # 25 Graph tools + 3 helpers
 
-        # status + ping (a live call against the mock Graph API)
-        data = _tool_text(await client.call_tool("facebook_pages_status", {"ping": True}))
+        # status checks the token live, so it reports expiry as well as presence
+        data = _tool_text(await client.call_tool("facebook_pages_status", {}))
         assert data["ready"] is True
-        assert data["ping"]["ok"] is True
+        assert data["token"]["ok"] is True
+        assert data["token"]["expired"] is False
         assert data["graph_version"] == "v27.0"
+
+        # ping=false skips the live call
+        data = _tool_text(await client.call_tool("facebook_pages_status", {"ping": False}))
+        assert "token" not in data
+        assert data["ready"] is True
 
         # list the Pages the token manages
         data = _tool_text(await client.call_tool("pages_list", {"limit": 10}))
@@ -387,6 +395,103 @@ async def test_stdio_bad_token_reports_graph_error(mock):
         assert "code=190" in result.content[0].text
 
 
+async def test_stdio_expired_token_says_so_and_how_to_replace_it(mock):
+    """An expired token is named as expired, with the date and the fix."""
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN)
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool("page_get", {"page_id": "1001"})
+        text = result.content[0].text
+        assert result.is_error
+        assert "EXPIRED on Friday, 13-Nov-26 14:00:00 PST" in text
+        assert "code=190 subcode=463" in text
+        assert "facebook_pages_set_token" in text
+
+        # Status reports the same, rather than calling the server ready.
+        data = _tool_text(await client.call_tool("facebook_pages_status", {}))
+        assert data["ready"] is False
+        assert data["token"]["ok"] is False
+        assert "EXPIRED" in data["token"]["error"]
+
+
+async def test_stdio_set_token_replaces_an_expired_token_without_restart(mock):
+    """A pasted token is verified, then used by every later call."""
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN, MCP_TOOL_PERMISSIONS="read")
+    async with Client(_server_params(env)) as client:
+        assert (await client.call_tool("page_get", {"page_id": "1001"})).is_error
+
+        data = _tool_text(
+            await client.call_tool(
+                "facebook_pages_set_token", {"access_token": mock_graph.FRESH_TOKEN}
+            )
+        )
+        assert data["applied"] is True
+        assert data["scope"] == "page"
+        assert data["token"]["is_valid"] is True
+        assert data["token"]["never_expires"] is True
+
+        # Later calls use the new token, with no restart.
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["name"] == "Prime Time IT"
+        sent = mock_graph.find_last("1001")
+        assert sent["headers"]["authorization"] == f"Bearer {mock_graph.FRESH_TOKEN}"
+
+        # Status says where the live token came from, and reports it as working.
+        status = _tool_text(await client.call_tool("facebook_pages_status", {}))
+        assert status["ready"] is True
+        assert "facebook_pages_set_token" in status["token_source"]
+        assert status["token"]["never_expires"] is True
+
+
+async def test_stdio_set_token_can_replace_the_user_token(mock):
+    """scope='user' replaces FB_USER_TOKEN, which the /me edges use."""
+    env = _env(mock, FB_USER_TOKEN=mock_graph.VALID_USER_TOKEN, MCP_TOOL_PERMISSIONS="read")
+    async with Client(_server_params(env)) as client:
+        data = _tool_text(await client.call_tool("pages_list", {}))
+        assert data["data"][0]["id"] == "1001"
+
+        result = await client.call_tool(
+            "facebook_pages_set_token",
+            {"access_token": "not-a-token", "scope": "user"},
+        )
+        assert result.is_error
+        assert "was not applied" in result.content[0].text
+
+        result = await client.call_tool(
+            "facebook_pages_set_token",
+            {"access_token": mock_graph.VALID_TOKEN, "scope": "nonsense"},
+        )
+        assert result.is_error
+        assert "scope must be" in result.content[0].text
+
+        # The configured user token still works.
+        data = _tool_text(await client.call_tool("pages_list", {}))
+        assert [p["id"] for p in data["data"]] == ["1001", "1002"]
+        assert mock_graph.find_last("me/accounts")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.VALID_USER_TOKEN}"
+        )
+
+
+async def test_stdio_set_token_rejects_a_bad_token_and_keeps_the_old_one(mock):
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.VALID_TOKEN, MCP_TOOL_PERMISSIONS="read")
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool("facebook_pages_set_token", {"access_token": "not-a-token"})
+        assert result.is_error
+        assert "was not applied" in result.content[0].text
+
+        # The token that already worked is still in use.
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["id"] == "1001"
+
+        # A token that is already expired is refused, not accepted and then failing.
+        result = await client.call_tool(
+            "facebook_pages_set_token", {"access_token": mock_graph.EXPIRED_TOKEN}
+        )
+        assert result.is_error
+        assert "expired" in result.content[0].text
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["id"] == "1001"
+
+
 async def test_stdio_missing_token_still_starts_and_reports_unready(mock):
     env = _env(mock)
     env["FB_PAGE_TOKEN"] = ""
@@ -428,7 +533,7 @@ async def test_stdio_read_write_permissions(mock):
 async def test_stdio_delete_permission_exposes_delete_tools(mock):
     names = await _tool_names(mock, MCP_TOOL_PERMISSIONS="read,write,delete")
     assert {"comment_delete", "post_delete"} <= names
-    assert len(names) == 27
+    assert len(names) == 28
 
 
 async def test_stdio_status_reports_permissions(mock):
@@ -545,6 +650,20 @@ async def test_http_requires_bearer_key(mock):
                     # write tools are not visible under read-only permissions
                     tools = await session.list_tools()
                     assert "page_publish" not in {t.name for t in tools.tools}
+
+                    # A token set over HTTP applies to later requests, not just the
+                    # one that set it. The server answers each request separately.
+                    started = len(mock_graph.REQUESTS)
+                    set_token = await session.call_tool(
+                        "facebook_pages_set_token", {"access_token": mock_graph.FRESH_TOKEN}
+                    )
+                    assert not set_token.is_error
+                    after_set = await session.call_tool("page_get", {"page_id": "1001"})
+                    assert not after_set.is_error
+                    assert len(mock_graph.REQUESTS) > started
+                    assert mock_graph.REQUESTS[-1]["headers"]["authorization"] == (
+                        f"Bearer {mock_graph.FRESH_TOKEN}"
+                    )
     finally:
         proc.terminate()
         try:

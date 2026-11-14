@@ -52,9 +52,13 @@ whether a tool is registered at all. See [Tool permissions](#tool-permissions).
 | `comment_delete` | `DELETE /{comment-id}` | delete |
 | `post_delete` | `DELETE /{post-id}` | delete |
 
-Two tools are always available because they describe this server and touch no
-Facebook data: `facebook_pages_status` (configuration and a live token check) and
-`facebook_pages_list_tools` (the tools currently enabled).
+Three tools are always available. They describe this server, and only
+`facebook_pages_status` and `token_debug` touch Facebook data:
+
+- `facebook_pages_status`: configuration, readiness, and the token's expiry.
+- `facebook_pages_set_token`: use a pasted access token for the rest of the
+  session, which is how an expired token is replaced without a restart.
+- `facebook_pages_list_tools`: the tools currently enabled.
 
 ### Reading Page Insights
 
@@ -147,10 +151,40 @@ never appears in `tools/list` and cannot be called.
    - read tools: `pages_show_list`, `pages_read_engagement`, `read_insights`
    - write tools: `pages_manage_posts`, `pages_manage_engagement`
 3. Pick the Page and copy the token.
-4. Exchange it for a **long-lived** token (60 days). Short-lived tokens expire in
-   about two hours and will break the server mid-session. The
+4. Exchange it for a **long-lived** user token (60 days), then call
+   `GET /me/accounts?fields=id,name,access_token` with it and copy the
+   `access_token` returned for your Page. Short-lived tokens expire in about two
+   hours, and a Page token taken from a short-lived user token expires within a
+   day. **A Page token taken from a long-lived user token has no expiry.** That
+   is the value `FB_PAGE_TOKEN` should hold. The
    [access token debugging tool](https://developers.facebook.com/tools/debug/accesstoken/)
    shows what you have and when it expires.
+
+`check` reports the same thing before you start the server:
+
+```bash
+facebook-pages-mcp-server check
+#   OK: type=PAGE app='1234567890' scopes=4
+#   Expiry: none (this token does not expire)
+```
+
+### Replacing an expired token without a restart
+
+A token can expire while the server runs. Rather than editing `.env` and
+restarting, pass the new token to `facebook_pages_set_token`:
+
+```json
+{"tool": "facebook_pages_set_token", "arguments": {"access_token": "EAAG..."}}
+```
+
+The token is checked with `debug_token` first. A token that Graph rejects, or
+that is already expired, is not applied, so a typo cannot leave every later call
+failing. A token that is accepted is used by every later call in that process.
+It is not written to the environment, so a restart goes back to the configured
+value; set `FB_PAGE_TOKEN` to keep it permanently.
+
+The same tool replaces the optional `FB_USER_TOKEN` when called with
+`"scope": "user"`.
 
 An app in *Development Mode* can only reach test users and Pages you own. That
 is fine for trying this out; it is the safest way to run it.
@@ -277,7 +311,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.2.0"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.3.0"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with
@@ -327,6 +361,13 @@ Insights" above; the reference tables still print deprecated names.
 error, or pass your own `fields`. Some fields are valid on one endpoint and not
 another, as described under "Choosing fields".
 
+**Every call fails with code 190.** The Facebook token is the problem, not the
+code. An expired token says so and quotes the date Graph gave, for example
+`Session has expired on Friday, 13-Nov-26 14:00:00 PST`. Mint a new one as
+described under "Get a Page access token", then pass it to
+`facebook_pages_set_token`. `facebook_pages_status` reports the expiry of the
+token in use, and `check` prints it before the server starts.
+
 ## Development
 
 ```bash
@@ -349,22 +390,30 @@ facebook_pages_mcp_server/
 ├── config.py        # environment variable handling
 ├── graph.py         # async Graph API client (httpx) + error handling
 ├── server.py        # MCPServer + tool registration + HTTP auth
-└── specs.py         # catalog of every tool: tier, description, endpoint
+├── specs.py         # catalog of every tool: tier, description, endpoint
+└── tokens.py        # token expiry and token-failure messages
 tests/
 ├── mock_graph.py    # mock Graph API for tests
 ├── test_graph.py    # client and configuration unit tests
+├── test_tokens.py   # token diagnostics unit tests
 └── test_e2e.py      # full server tests (stdio + HTTP)
 ```
 
 ## Security notes
 
-- The Facebook token and the MCP Bearer token are only ever read from the
-  environment. They are never logged and never a tool parameter.
+- The MCP Bearer token is read only from the environment and is never logged.
+- The Facebook token is read from the environment, except when you pass a
+  replacement to `facebook_pages_set_token`. It is never logged, never written to
+  the environment by the server, and never included in a tool response. Only the
+  token's type, scopes and expiry are reported.
 - The Facebook token is sent in the `Authorization: Bearer` header, so it never
   appears in a URL, an access log, or a Graph pagination link.
 - `MCP_API_KEY` comparison is constant-time (`hmac.compare_digest`).
-- Facebook access tokens expire. A 60-day long-lived token still needs
-  replacing; `facebook_pages_status` with `ping=true` reports the expiry.
+- Facebook access tokens expire. `facebook_pages_status` reports the type,
+  scopes and expiry of the token in use, and an expired token makes it report
+  `ready: false`. A Page token from a long-lived user token has no expiry, which
+  is the state to aim for; `facebook_pages_set_token` replaces a dead token
+  without a restart.
 - Use HTTPS for anything beyond localhost, and rotate the MCP token regularly.
 - Keep the app in Development Mode, or scope the token to one test Page, before
   enabling `write` or `delete`.

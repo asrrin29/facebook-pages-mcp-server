@@ -38,6 +38,7 @@ from mcp.types import ToolAnnotations
 
 from .config import SERVER_NAME, SERVER_VERSION, Config
 from .graph import GraphClient, GraphError
+from .tokens import describe_token_error, token_state
 from .specs import (
     ALBUM_FIELDS,
     COMMENT_FIELDS,
@@ -75,10 +76,14 @@ DELETE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent
 
 
 class ServerState:
-    """Holds the lazily-created Graph client for the process."""
+    """Holds the Graph client for the process, and any token set at run time."""
 
     def __init__(self, config: Config):
+        # The configuration read at start is kept so a run-time token can be
+        # removed again.
+        self._startup_config = config
         self.config = config
+        self.token_scope_overridden: str | None = None
         self._client: GraphClient | None = None
         self._lock = asyncio.Lock()
 
@@ -93,6 +98,21 @@ class ServerState:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    async def use_token(self, scope: str, token: str | None) -> None:
+        """Use ``token`` for ``scope`` calls for the rest of this process.
+
+        ``token`` of None restores the value read from the environment at start.
+        The cached client authenticated the previous token, so it is closed and
+        built again on the next call.
+        """
+        self.config = (
+            self._startup_config
+            if token is None
+            else self.config.with_token(scope, token)
+        )
+        self.token_scope_overridden = None if token is None else scope
+        await self.aclose()
 
     async def call(self, coro_factory: Callable[[GraphClient], Any], *, scope: str = "page") -> Any:
         """Run one Graph call, turning Graph failures into MCP tool errors.
@@ -151,6 +171,12 @@ def _edge(payload: Any) -> Any:
 
 
 def _format_graph_error(exc: GraphError) -> str:
+    """Report a Graph failure with its codes, and what to do about a token failure.
+
+    An expired token otherwise reads as a generic authentication error. Graph
+    puts the expiry date in the message text, so it is quoted back with the
+    steps that replace the token.
+    """
     parts = [str(exc)]
     details = [
         f"{label}={value}"
@@ -165,6 +191,9 @@ def _format_graph_error(exc: GraphError) -> str:
     ]
     if details:
         parts.append(" ".join(details))
+    explanation = describe_token_error(exc)
+    if explanation:
+        parts.append(explanation)
     return " | ".join(parts)
 
 
@@ -626,7 +655,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
     # Helper tools: describe this server, never Facebook
     # ---------------------------------------------------------------
 
-    async def facebook_pages_status(ping: bool = False) -> dict[str, Any]:
+    async def facebook_pages_status(ping: bool = True) -> dict[str, Any]:
         cfg = state.config
         info: dict[str, Any] = {
             "graph_api_root": cfg.api_root,
@@ -639,18 +668,96 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             "timeout_seconds": cfg.timeout_seconds,
             "ready": bool(cfg.page_token),
         }
-        if ping:
-            try:
-                payload = await state.call(
-                    lambda c: c.get("debug_token", {"input_token": cfg.page_token})
-                )
-                data = payload.get("data", payload) if isinstance(payload, dict) else payload
-                info["ping"] = {"ok": True, "token": data}
-            except ToolError as exc:
-                info["ping"] = {"ok": False, "error": str(exc)}
-        elif not info["ready"]:
-            info["hint"] = "Set FB_PAGE_TOKEN to a Facebook Page access token to enable Facebook calls."
+        if state.token_scope_overridden:
+            info["token_source"] = (
+                f"a {state.token_scope_overridden}-scope token set at run time by "
+                "facebook_pages_set_token; a restart returns to the configured value"
+            )
+        if not info["ready"]:
+            info["hint"] = (
+                "Set FB_PAGE_TOKEN to a Facebook Page access token, or pass a token "
+                "to facebook_pages_set_token, to enable Facebook calls."
+            )
+            return info
+        if not ping:
+            return info
+        # A token that is configured is not a token that works. An expired Page
+        # token otherwise shows here as ready: true until some other call fails.
+        # debug_token is one cheap call, so the status is reported live by default.
+        try:
+            payload = await state.call(
+                lambda c: c.get("debug_token", {"input_token": cfg.page_token})
+            )
+        except ToolError as exc:
+            info["ready"] = False
+            info["token"] = {"ok": False, "error": str(exc)}
+            return info
+        info["token"] = {"ok": True, **token_state(payload)}
+        if info["token"].get("expired"):
+            info["ready"] = False
+            info["hint"] = (
+                "The configured token has expired. Mint a new one and pass it to "
+                "facebook_pages_set_token, or set FB_PAGE_TOKEN and restart."
+            )
         return info
+
+    async def facebook_pages_set_token(
+        access_token: str, scope: str = "page"
+    ) -> dict[str, Any]:
+        """Verify a pasted token, then use it for the rest of this process."""
+        token = _require(access_token, "access_token")
+        wanted = scope.strip().lower()
+        if wanted not in ("page", "user"):
+            raise ToolError("scope must be 'page' (replaces FB_PAGE_TOKEN) or 'user' (replaces FB_USER_TOKEN).")
+
+        # The new token is applied before it is checked, because the check must
+        # be made with it. A token debug_token rejects is removed again, so a
+        # typo cannot leave every later call failing.
+        await state.use_token(wanted, token)
+        try:
+            # scope selects which configured token authenticates this call, so the
+            # token just supplied is also the caller on debug_token.
+            payload = await state.call(
+                lambda c: c.get("debug_token", {"input_token": token}, scope=wanted),
+                scope=wanted,
+            )
+        except ToolError as exc:
+            await state.use_token(wanted, None)
+            raise ToolError(
+                f"The token was not accepted, so it was not applied: {exc}"
+            ) from exc
+
+        state_report = token_state(payload)
+        if not state_report["is_valid"]:
+            await state.use_token(wanted, None)
+            raise ToolError(
+                "debug_token reports this token is not valid, so it was not applied. "
+                "Check that it is a Page access token for the Page you want."
+            )
+        if state_report["expired"]:
+            await state.use_token(wanted, None)
+            raise ToolError(
+                f"The token expired at {state_report['expires_at_utc']}, so it was not "
+                "applied. Mint a new one: exchange the user token for a long-lived "
+                "one, then call me/accounts and use the access_token returned for the "
+                "Page. That kind of Page token does not expire."
+            )
+
+        logger.info(
+            "Using a %s-scope access token set at run time (Graph API %s)",
+            wanted,
+            state.config.graph_version,
+        )
+        return {
+            "applied": True,
+            "scope": wanted,
+            "token": state_report,
+            "note": (
+                "Every later call in this process uses this token. It is not stored "
+                "in the environment, so a restart goes back to the configured value. "
+                "Set FB_PAGE_TOKEN to keep it."
+            ),
+        }
 
     async def facebook_pages_list_tools() -> dict[str, Any]:
         return {
@@ -699,6 +806,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         "comment_delete": comment_delete,
         "post_delete": post_delete,
         "facebook_pages_status": facebook_pages_status,
+        "facebook_pages_set_token": facebook_pages_set_token,
         "facebook_pages_list_tools": facebook_pages_list_tools,
     }
 

@@ -567,12 +567,27 @@ HELPER_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="facebook_pages_status",
         tier="helper",
-        summary="Report this server's configuration and readiness",
-        api="(local)",
+        summary="Report this server's configuration, readiness, and token expiry",
+        api="(local) plus GET /debug_token",
         description=(
-            "Report the configured Graph API version, which tokens are set, and the "
-            "enabled tool permissions. Set ping=true to make one live Graph API call "
-            "(debug_token) and confirm the token works."
+            "Report the configured Graph API version, the enabled tool permissions, "
+            "and the Facebook token's type, scopes and expiry. The token is checked "
+            "live with debug_token, so an expired token is reported as expired rather "
+            "than shown as configured. Set ping=false to skip the live call."
+        ),
+    ),
+    ToolSpec(
+        name="facebook_pages_set_token",
+        tier="helper",
+        summary="Use a different Facebook access token for the rest of this session",
+        api="(local) after GET /debug_token",
+        description=(
+            "Verify a pasted access token with debug_token, then use it for every "
+            "later call in this process. Use it when the configured token has expired "
+            "and a new one has just been minted: no restart is needed. scope 'page' "
+            "replaces FB_PAGE_TOKEN, scope 'user' replaces FB_USER_TOKEN. The token "
+            "is not written to the environment, so a restart goes back to the "
+            "configured value. A token that debug_token rejects is not applied."
         ),
     ),
     ToolSpec(
