@@ -211,8 +211,11 @@ INSIGHTS_METRICS: dict[str, tuple[str, ...]] = {
 
 # Metrics the API rejects, copied from Meta's deprecated-metrics list. A rejected
 # metric fails the entire Insights request, so none of these are offered; the
-# discovery tool reports each with the replacement Meta names.
+# discovery tool reports each with the replacement Meta names. Every name Meta has
+# published is listed, so a legacy name a caller supplies resolves here instead of
+# arriving as an unexplained error. An empty replacement means Meta names none.
 #
+# Deprecated 2024-03-14: activity, page-view, check-in, and button-click metrics.
 # Deprecated 2025-06-15: the unique reach metrics and the per-post impression
 # breakdowns. Deprecated 2025-11-15: the Page-likes metrics and the remaining
 # impressions metrics. The reference pages also mention a further set deprecated
@@ -244,6 +247,9 @@ RETIRED_INSIGHTS_METRICS: dict[str, str] = {
     "post_impressions_paid_unique": "",
     "post_impressions_fan": "post_media_view with the is_from_followers breakdown",
     "post_impressions_fan_unique": "",
+    # Meta's stated alternative for post_impressions_organic is "post_impressions
+    # with the is_from_organic breakdown", and post_impressions is itself
+    # deprecated, so no replacement can be offered.
     "post_impressions_organic": "",
     "post_impressions_organic_unique": "",
     "post_impressions_viral": "",
@@ -259,6 +265,76 @@ RETIRED_INSIGHTS_METRICS: dict[str, str] = {
     "page_fan_adds_unique": "",
     "page_fan_removes": "",
     "page_fan_removes_unique": "",
+    # Deprecated 2024-03-14. Meta names no replacement for any of these.
+    "page_call_phone_clicks_by_age_gender_logged_in_unique": "",
+    "page_call_phone_clicks_by_site_logged_in_unique": "",
+    "page_call_phone_clicks_logged_in_by_city_unique": "",
+    "page_call_phone_clicks_logged_in_by_country_unique": "",
+    "page_call_phone_clicks_logged_in_by_locale_unique": "",
+    "page_consumptions": "",
+    "page_content_activity": "",
+    "page_content_activity_by_action_type": "",
+    "page_content_activity_by_action_type_unique": "",
+    "page_content_activity_by_age_gender_unique": "",
+    "page_content_activity_by_city_unique": "",
+    "page_content_activity_by_country_unique": "",
+    "page_content_activity_by_locale_unique": "",
+    "page_content_activity_unique": "",
+    "page_cta_clicks_by_age_gender_logged_in_unique": "",
+    "page_cta_clicks_by_site_logged_in_unique": "",
+    "page_cta_clicks_logged_in_by_city_unique": "",
+    "page_cta_clicks_logged_in_by_country_unique": "",
+    "page_cta_clicks_logged_in_by_locale_unique": "",
+    "page_daily_follows_by_source_unique": "",
+    "page_daily_unfollows_by_source_unique": "",
+    "page_engaged_users": "",
+    "page_fans_by_like_source": "",
+    "page_fans_by_like_source_unique": "",
+    "page_fans_by_unlike_source": "",
+    "page_fans_by_unlike_source_unique": "",
+    "page_fans_gender_age": "",
+    "page_follows_gender_age": "",
+    "page_follows_locale": "",
+    "page_get_directions_clicks_by_age_gender_logged_in_unique": "",
+    "page_get_directions_clicks_by_site_logged_in_unique": "",
+    "page_get_directions_clicks_logged_in_by_city_unique": "",
+    "page_get_directions_clicks_logged_in_by_country_unique": "",
+    "page_impressions_frequency_distribution": "",
+    "page_places_checkin_mobile": "",
+    "page_places_checkin_mobile_unique": "",
+    "page_places_checkins_by_age_gender": "",
+    "page_places_checkins_by_city": "",
+    "page_places_checkins_by_country": "",
+    "page_places_checkins_by_locale": "",
+    "page_positive_feedback": "",
+    "page_positive_feedback_by_type": "",
+    "page_positive_feedback_by_type_unique": "",
+    "page_positive_feedback_unique": "",
+    "page_posts_impressions_frequency_distribution": "",
+    "page_views_by_age_gender_logged_in_unique": "",
+    "page_views_by_city_logged_in_unique": "",
+    "page_views_by_country_logged_in_unique": "",
+    "page_views_by_internal_referer_logged_in_unique": "",
+    "page_views_by_locale_logged_in_unique": "",
+    "page_views_by_profile_tab_logged_in_unique": "",
+    "page_views_by_profile_tab_total": "",
+    "page_views_by_referers_logged_in_unique": "",
+    "page_views_by_site_logged_in_unique": "",
+    "page_views_external_referrals": "",
+    "page_views_logged_in_total": "",
+    "page_views_logged_in_unique": "",
+    "page_views_login": "",
+    "page_views_login_unique": "",
+    "page_views_logout": "",
+    "page_website_clicks_by_age_gender_logged_in_unique": "",
+    "page_website_clicks_by_site_logged_in_unique": "",
+    "page_website_clicks_logged_in_by_city_unique": "",
+    "page_website_clicks_logged_in_by_country_unique": "",
+    "page_website_clicks_logged_in_by_locale_unique": "",
+    "post_activity": "",
+    "post_activity_unique": "",
+    "post_impressions_fan_paid": "",
+    "post_impressions_fan_paid_unique": "",
 }
 
 POST_INSIGHTS_METRICS: tuple[str, ...] = (

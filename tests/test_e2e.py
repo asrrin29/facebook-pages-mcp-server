@@ -204,10 +204,22 @@ async def test_stdio_tool_list_and_calls(mock):
         assert result.is_error
         assert "code=100" in result.content[0].text
 
-        # a metric the current version rejects is reported the same way
+        # A metric on Meta's deprecated list is answered without a call, naming
+        # the replacement. One rejected metric fails a whole Insights request, so
+        # this is worth catching before sending anything.
+        before = len(mock_graph.REQUESTS)
         result = await client.call_tool("page_insights", {"page_id": "1001", "metrics": ["page_fans"]})
         assert result.is_error
-        assert "page_fans" in result.content[0].text
+        assert "page_fans -> page_follows" in result.content[0].text
+        assert len(mock_graph.REQUESTS) == before
+
+        # A 2024-wave name, which has no replacement, is still identified.
+        result = await client.call_tool(
+            "page_insights", {"page_id": "1001", "metrics": ["page_content_activity"]}
+        )
+        assert result.is_error
+        assert "page_content_activity (no replacement)" in result.content[0].text
+        assert len(mock_graph.REQUESTS) == before
 
         # metric reference
         data = _tool_text(await client.call_tool("page_insights_metrics", {"group": "engagement"}))
@@ -435,11 +447,25 @@ async def test_stdio_set_token_replaces_an_expired_token_without_restart(mock):
         sent = mock_graph.find_last("1001")
         assert sent["headers"]["authorization"] == f"Bearer {mock_graph.FRESH_TOKEN}"
 
+        # token_debug with no arguments must inspect the token now in use, not the
+        # one read at start. That is the failure reported against a live Page:
+        # the setter ran, and token_debug still described the expired session.
+        data = _tool_text(await client.call_tool("token_debug", {}))
+        assert data["data"]["is_valid"] is True
+        assert mock_graph.find_last("debug_token")["query"]["input_token"] == mock_graph.FRESH_TOKEN
+
         # Status says where the live token came from, and reports it as working.
         status = _tool_text(await client.call_tool("facebook_pages_status", {}))
         assert status["ready"] is True
         assert "facebook_pages_set_token" in status["token_source"]
         assert status["token"]["never_expires"] is True
+        assert mock_graph.find_last("debug_token")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.FRESH_TOKEN}"
+        )
+
+        # The self-reported manifest lists the setter itself.
+        listed = _tool_text(await client.call_tool("facebook_pages_list_tools", {}))
+        assert "facebook_pages_set_token" in {t["tool"] for t in listed["tools"]}
 
 
 async def test_stdio_set_token_can_replace_the_user_token(mock):

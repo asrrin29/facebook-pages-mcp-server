@@ -152,6 +152,25 @@ def _metric_list(metrics: list[str] | None, tool_hint: str) -> str:
     names = [m.strip() for m in (metrics or []) if m and m.strip()]
     if not names:
         raise ToolError(f"metrics must list at least one metric name. {tool_hint}")
+    # One rejected metric fails the whole Insights request, so a metric on Meta's
+    # deprecated list is answered here, with its replacement, rather than costing
+    # a call that returns an unexplained error. A metric Meta rejects for a reason
+    # not in that list still reaches the API and is reported as Graph states it.
+    retired = [name for name in names if name in RETIRED_INSIGHTS_METRICS]
+    if retired:
+        named = "; ".join(
+            f"{name} -> {RETIRED_INSIGHTS_METRICS[name]}"
+            if RETIRED_INSIGHTS_METRICS[name]
+            else f"{name} (no replacement)"
+            for name in retired
+        )
+        raise ToolError(
+            f"the metric(s) {named} are deprecated and the API rejects them; one "
+            "rejected metric fails the whole request. Replace them and try again. "
+            "page_insights_metrics lists current names and the full retired list. "
+            "https://developers.facebook.com/documentation/pages-api/"
+            "platforminsights/page/deprecated-metrics"
+        )
     return ",".join(names)
 
 
@@ -385,6 +404,9 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         return {
             "page_metrics_by_group": {name: list(metrics) for name, metrics in groups.items()},
             "post_metrics": list(POST_INSIGHTS_METRICS),
+            # One map keyed by every name the API rejects, so a metric a caller
+            # supplies resolves here whatever its value. The value is the
+            # replacement Meta names, or "no replacement" where Meta names none.
             "retired_metrics": {
                 name: (replacement or "no replacement")
                 for name, replacement in RETIRED_INSIGHTS_METRICS.items()
@@ -504,8 +526,10 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
 
     async def token_debug(input_token: str | None = None) -> dict[str, Any]:
         # Graph requires input_token; without it the call always fails. The
-        # configured token is the default subject, so callers rarely pass one.
-        subject = (input_token or "").strip() or config.page_token
+        # default subject is the token this process is using now, which includes
+        # a token supplied to facebook_pages_set_token. Reading the configuration
+        # captured at start would inspect a token that is no longer in use.
+        subject = (input_token or "").strip() or state.config.page_token
         if not subject:
             raise ToolError(
                 "input_token is required and no FB_PAGE_TOKEN is configured to inspect instead."
@@ -530,10 +554,10 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             if method not in ("GET", "POST", "DELETE"):
                 raise ToolError(f"unsupported method {method!r} in a batch entry.")
             needed = "delete" if method == "DELETE" else "write"
-            if method != "GET" and not config.allows_action(needed):
+            if method != "GET" and not state.config.allows_action(needed):
                 raise ToolError(
                     f"a {method} batch entry needs the {needed} permission "
-                    f"(MCP_TOOL_PERMISSIONS={','.join(config.tool_permissions) or '<none>'})."
+                    f"(MCP_TOOL_PERMISSIONS={','.join(state.config.tool_permissions) or '<none>'})."
                 )
             entry = dict(raw)
             entry.pop("relative_path", None)
@@ -549,11 +573,11 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
 
     async def graph_follow(url: str) -> dict[str, Any]:
         target = (url or "").strip()
-        allowed_prefixes = ("https://graph.facebook.com/", f"{config.graph_base_url}/")
+        allowed_prefixes = ("https://graph.facebook.com/", f"{state.config.graph_base_url}/")
         if not target.startswith(allowed_prefixes):
             raise ToolError(
                 f"url must be a Graph API URL from a previous result (it starts with "
-                f"{config.graph_base_url}/), got {url!r}."
+                f"{state.config.graph_base_url}/), got {url!r}."
             )
         payload = await state.call(lambda c: c.get_url(target))
         return _edge(payload)
@@ -761,7 +785,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
 
     async def facebook_pages_list_tools() -> dict[str, Any]:
         return {
-            "tool_permissions": list(config.tool_permissions),
+            "tool_permissions": list(state.config.tool_permissions),
             "tools": [
                 {
                     "tool": spec.name,
@@ -771,7 +795,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
                     **({"requirements": spec.notes} if spec.notes else {}),
                 }
                 for spec in (*TOOL_SPECS, *HELPER_TOOL_SPECS)
-                if spec.tier == "helper" or config.allows_action(spec.tier)
+                if spec.tier == "helper" or state.config.allows_action(spec.tier)
             ],
         }
 

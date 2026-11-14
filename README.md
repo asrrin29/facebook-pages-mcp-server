@@ -85,9 +85,11 @@ The reference tables still print the deprecated names, so they are not a reliabl
 guide. The list the API enforces is
 [Deprecated Facebook Page Insights Metrics](https://developers.facebook.com/documentation/pages-api/platforminsights/page/deprecated-metrics).
 One rejected metric fails the whole Insights request with error 100, which is why
-the tools never offer them. `page_insights_metrics` lists each name with its
-replacement under `retired_metrics`, so a question like "how many people saw this
-post?" is answered with a metric that still works.
+the tools never offer them. Every name Meta has published is known to the server:
+`page_insights_metrics` lists them under `retired_metrics` with the replacement,
+and an Insights request that names one is answered with that replacement instead
+of being sent to the API. A metric Meta rejects for a reason outside that list
+still reaches the API and is reported as Graph states it.
 
 Three constraints worth knowing before you build a report: Page Insights are only
 available for Pages with 100 or more likes, most metrics update once per day, and
@@ -311,7 +313,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.3.0"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.4.0"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with
@@ -353,9 +355,12 @@ rather than `pip install -e .`, a later source edit is not picked up until you
 install again.
 
 **Insights return an invalid-metric error (code 100).** One unsupported metric
-fails the whole request. Call `page_insights_metrics` and read `retired_metrics`
-for the replacement. The list Meta enforces is linked under "Reading Page
-Insights" above; the reference tables still print deprecated names.
+fails the whole request. A metric on Meta's published deprecated list is caught
+before the request and answered with its replacement, so this error now means a
+name Meta rejects for a reason outside that list. Call `page_insights_metrics`
+and read `retired_metrics` for the replacement. The list Meta enforces is linked
+under "Reading Page Insights" above; the reference tables still print deprecated
+names.
 
 **A read fails on a field you did not ask for.** Drop the field named in the
 error, or pass your own `fields`. Some fields are valid on one endpoint and not
