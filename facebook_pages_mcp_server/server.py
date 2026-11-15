@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import AliasChoices, Field
 from mcp.types import ToolAnnotations
 
 from .config import SERVER_NAME, SERVER_VERSION, Config
@@ -135,11 +137,42 @@ class ServerState:
 # ---------------------------------------------------------------------------
 
 
+# Accepted parameter names for the access token. An AI client often names this
+# argument `token` or `page_token` rather than `access_token`. A call naming an
+# unrecognised parameter is rejected before the handler runs, so the token is
+# never sent to Facebook and the failure reads as "the token was not accepted".
+# The advertised schema still names only `access_token`; these alternatives are
+# accepted on the way in. `access_token` is listed first, so a call that supplies
+# two of them uses the canonical name.
+TOKEN_ARGUMENT_NAMES = ("access_token", "token", "page_token", "accessToken", "fb_access_token")
+
+TokenAlias = Annotated[
+    str,
+    Field(validation_alias=AliasChoices(*TOKEN_ARGUMENT_NAMES)),
+]
+
+
 def _require(value: str | None, label: str) -> str:
     if value is None or not str(value).strip():
         hint = " Call pages_list to see the Pages this token manages." if label == "page_id" else ""
         raise ToolError(f"{label} is required.{hint}")
     return str(value).strip()
+
+
+_BEARER_PREFIX = re.compile(r"^\s*bearer\s+", re.IGNORECASE)
+
+
+def _normalize_token(value: str) -> str:
+    """Return a pasted access token in the form the Graph API expects.
+
+    A token copied from an HTTP header, a curl example, or a config file can
+    arrive as ``Bearer EAAG...`` or wrapped in quotes. Sent as written, Graph
+    rejects it and the answer reads as though the token were invalid.
+    """
+    token = _BEARER_PREFIX.sub("", str(value).strip())
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        token = token[1:-1].strip()
+    return token
 
 
 def _date_params(since: int | None, until: int | None) -> dict[str, Any]:
@@ -726,10 +759,11 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         return info
 
     async def facebook_pages_set_token(
-        access_token: str, scope: str = "page"
+        access_token: TokenAlias,
+        scope: str = "page",
     ) -> dict[str, Any]:
         """Verify a pasted token, then use it for the rest of this process."""
-        token = _require(access_token, "access_token")
+        token = _normalize_token(_require(access_token, "access_token"))
         wanted = scope.strip().lower()
         if wanted not in ("page", "user"):
             raise ToolError("scope must be 'page' (replaces FB_PAGE_TOKEN) or 'user' (replaces FB_USER_TOKEN).")

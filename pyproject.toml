@@ -1,6 +1,6 @@
 [project]
 name = "facebook-pages-mcp-server"
-version = "1.4.0"
+version = "1.4.1"
 description = "MCP server that lets AI agents work with Facebook Pages through the Graph API"
 readme = "README.md"
 requires-python = ">=3.10"

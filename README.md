@@ -188,6 +188,13 @@ value; set `FB_PAGE_TOKEN` to keep it permanently.
 The same tool replaces the optional `FB_USER_TOKEN` when called with
 `"scope": "user"`.
 
+The parameter may also be named `token`, `page_token`, `accessToken`, or
+`fb_access_token`, and a value may carry a `Bearer ` prefix or surrounding
+quotes. An AI client often writes the call that way, and a request naming an
+unrecognised parameter is rejected before any handler runs, which looks exactly
+like a bad token. A token copied from an HTTP header or a config file is used as
+written.
+
 An app in *Development Mode* can only reach test users and Pages you own. That
 is fine for trying this out; it is the safest way to run it.
 
@@ -313,7 +320,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.4.0"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.4.1"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with

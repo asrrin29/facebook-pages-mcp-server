@@ -468,6 +468,48 @@ async def test_stdio_set_token_replaces_an_expired_token_without_restart(mock):
         assert "facebook_pages_set_token" in {t["tool"] for t in listed["tools"]}
 
 
+async def test_stdio_set_token_accepts_the_names_an_ai_client_reaches_for(mock):
+    """A token named `token` or `page_token` must still be applied.
+
+    A call naming an unrecognised parameter is rejected before the handler runs,
+    so the token is never sent to Facebook and the failure reads as though the
+    token itself were bad.
+    """
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN, MCP_TOOL_PERMISSIONS="read")
+    async with Client(_server_params(env)) as client:
+        for argument in ("access_token", "token", "page_token", "accessToken"):
+            data = _tool_text(
+                await client.call_tool(
+                    "facebook_pages_set_token", {argument: mock_graph.FRESH_TOKEN}
+                )
+            )
+            assert data["applied"] is True, argument
+            page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+            assert page["id"] == "1001", argument
+
+        # A token copied from a header or a config file can carry a Bearer prefix
+        # or quotes. Sent as written, Graph rejects it and the answer reads as
+        # though the token were invalid.
+        for pasted in (
+            f"Bearer {mock_graph.FRESH_TOKEN}",
+            f"bearer {mock_graph.FRESH_TOKEN}",
+            f'"{mock_graph.FRESH_TOKEN}"',
+            f"  {mock_graph.FRESH_TOKEN}  ",
+        ):
+            data = _tool_text(
+                await client.call_tool("facebook_pages_set_token", {"token": pasted})
+            )
+            assert data["applied"] is True, pasted
+        assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.FRESH_TOKEN}"
+        )
+
+        # Omitting the token is still an error, and it names the parameter.
+        result = await client.call_tool("facebook_pages_set_token", {"scope": "page"})
+        assert result.is_error
+        assert "access_token" in result.content[0].text
+
+
 async def test_stdio_set_token_can_replace_the_user_token(mock):
     """scope='user' replaces FB_USER_TOKEN, which the /me edges use."""
     env = _env(mock, FB_USER_TOKEN=mock_graph.VALID_USER_TOKEN, MCP_TOOL_PERMISSIONS="read")
