@@ -396,6 +396,12 @@ names.
 error, or pass your own `fields`. Some fields are valid on one endpoint and not
 another, as described under "Choosing fields".
 
+**`pages_list` answers `(#100) Tried accessing nonexisting field (accounts)`.**
+The token in use is a Page token. With one, `me` is the Page itself, and a Page
+has no `accounts` edge. That tool needs a user token, which is what lists the
+Pages a person manages. A token supplied with a call is used exactly as given, so
+this error is Graph naming the token's kind rather than a fault in the request.
+
 **Every call fails with code 190.** The Facebook token is the problem, not the
 code. An expired token says so and quotes the date Graph gave, for example
 `Session has expired on Friday, 13-Nov-26 14:00:00 PST`. Mint a new one as
