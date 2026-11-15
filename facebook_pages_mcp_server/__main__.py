@@ -105,6 +105,59 @@ async def _cmd_check(config: Config) -> int:
     return 1 if state["expired"] else 0
 
 
+async def _cmd_refresh_token(config: Config, page_id: str | None) -> int:
+    """Mint a Page token that does not expire, and print it for FB_PAGE_TOKEN.
+
+    This is the one-time step that ends a token expiring on a schedule. It needs
+    the app credentials and a User token that has not expired, and it does not
+    need the currently configured Page token to work.
+    """
+    from .graph import GraphClient, GraphError
+    from .refresh import RefreshError, mint_page_token
+
+    try:
+        async with GraphClient(config) as client:
+            minted = await mint_page_token(
+                client,
+                app_id=config.app_id,
+                app_secret=config.app_secret,
+                user_token=config.user_token,
+                page_id=page_id,
+            )
+    except RefreshError as exc:
+        print(f"Cannot mint a Page token: {exc}", file=sys.stderr)
+        return 1
+    except GraphError as exc:
+        print(f"The Graph API refused the request: {exc}", file=sys.stderr)
+        explanation = describe_token_error(exc)
+        if explanation:
+            print(f"  {explanation}", file=sys.stderr)
+        return 1
+
+    report = minted["token"]
+    print(f"Page:          {minted['page']['id']} ({minted['page']['name']})")
+    if report["never_expires"]:
+        print("Expiry:        none (this token does not expire)")
+    else:
+        verdict = "EXPIRED" if report["expired"] else f"expires in {report['days_left']} day(s)"
+        print(f"Expiry:        {report['expires_at_utc']} ({verdict})")
+    if minted.get("user_token_expires_at_utc"):
+        print(f"User token:    valid until {minted['user_token_expires_at_utc']}")
+    print()
+    print("Set this as FB_PAGE_TOKEN:")
+    print()
+    print(minted["page_token"])
+    if report["expired"]:
+        print(
+            "\nNOTE: this token is already expired, so it will not work. Confirm "
+            "FB_APP_ID and FB_APP_SECRET belong to the app that issued the User "
+            "token.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _run_stdio(config: Config) -> int:
     mcp, _state = build_server(config)
     mcp.run(transport="stdio")
@@ -192,6 +245,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve-http", help="Run the MCP server on streamable HTTP with Bearer auth")
     sub.add_parser("gen-key", help="Generate a new MCP API key")
     sub.add_parser("check", help="Validate configuration and ping the Graph API")
+    refresh = sub.add_parser(
+        "refresh-token",
+        help="Mint a Page access token that does not expire, and print it",
+    )
+    refresh.add_argument(
+        "--page",
+        dest="page_id",
+        default=None,
+        help="Page id to mint the token for, when the User token manages several",
+    )
     args = parser.parse_args(argv)
 
     if args.version:
@@ -211,6 +274,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "check":
         return asyncio.run(_cmd_check(config))
+    if command == "refresh-token":
+        return asyncio.run(_cmd_refresh_token(config, args.page_id))
     if command == "serve-http":
         return _run_http(config)
     # default: serve on stdio

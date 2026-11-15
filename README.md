@@ -52,12 +52,16 @@ whether a tool is registered at all. See [Tool permissions](#tool-permissions).
 | `comment_delete` | `DELETE /{comment-id}` | delete |
 | `post_delete` | `DELETE /{post-id}` | delete |
 
-Three tools are always available. They describe this server, and only
-`facebook_pages_status` and `token_debug` touch Facebook data:
+Four tools are always available. They describe this server, and only
+`facebook_pages_status`, `token_debug`, and `facebook_pages_refresh_token` touch
+Facebook data:
 
 - `facebook_pages_status`: configuration, readiness, and the token's expiry.
 - `facebook_pages_set_token`: use a pasted access token for the rest of the
   session, which is how an expired token is replaced without a restart.
+- `facebook_pages_refresh_token`: mint a Page token that does not expire, using
+  the app credentials. See
+  [A Page token that never expires](#a-page-token-that-never-expires).
 - `facebook_pages_list_tools`: the tools currently enabled.
 
 ### Reading Page Insights
@@ -218,6 +222,56 @@ unrecognised parameter is rejected before any handler runs, which looks exactly
 like a bad token. A token copied from an HTTP header or a config file is used as
 written.
 
+### A Page token that never expires
+
+A Page token inherits the lifetime of the user token it was read with. Read with
+a short-lived user token, it dies within a day. Read with a long-lived user
+token, it has no expiry at all. The difference is one extra call, and doing it
+once ends the cycle of minting tokens.
+
+Set the app credentials once, then call `facebook_pages_refresh_token`:
+
+```json
+{"tool": "facebook_pages_refresh_token", "arguments": {"user_token": "EAAG..."}}
+```
+
+It performs the three steps in order: exchange the user token for a long-lived
+one with `GET /oauth/access_token?grant_type=fb_exchange_token`, read
+`me/accounts?fields=id,name,category,access_token` with that result, and use the
+Page token that returns. The response includes `page_token`, so the value can be
+stored as `FB_PAGE_TOKEN` and survive a restart. `never_expires: true` confirms
+the result is the permanent kind.
+
+What it needs:
+
+- `FB_APP_ID` and `FB_APP_SECRET`, or `app_id` and `app_secret` with the call.
+  The exchange authenticates as the app, so no access token can stand in for
+  them. They are in the app dashboard under Settings > Basic.
+- A user token that has not expired, passed as `user_token` or held in
+  `FB_USER_TOKEN`. A Page token cannot be exchanged: with one, `me` is the Page,
+  and a Page has no `accounts` edge. Graph also refuses an exchange for a token
+  that has already expired, so an expired user token must be re-issued first.
+- `page_id` when the user token manages more than one Page. The tool names the
+  Pages it can see rather than guessing.
+
+Nothing is applied until every step has succeeded. A Page token that
+`debug_token` rejects, or that is already past its expiry, is not installed, so a
+failed refresh leaves the working token in place.
+
+The same flow is available before the server runs:
+
+```bash
+facebook-pages-mcp-server refresh-token --page 846466585206528
+# Page:          846466585206528 (Prime Time It)
+# Expiry:        none (this token does not expire)
+#
+# Set this as FB_PAGE_TOKEN:
+#
+# EAQ...long value...
+```
+
+The App Secret is sent only to the token exchange. No Page call carries it.
+
 An app in *Development Mode* can only reach test users and Pages you own. That
 is fine for trying this out; it is the safest way to run it.
 
@@ -240,6 +294,8 @@ cp .env.example .env
 # edit .env:
 #   FB_PAGE_TOKEN=...      (required)
 #   FB_USER_TOKEN=...      (optional, only for pages_list / pages_find)
+#   FB_APP_ID=...          (optional, only to mint a token that never expires)
+#   FB_APP_SECRET=...      (optional, same)
 #   MCP_API_KEY=...        (only needed for serve-http)
 ```
 
@@ -281,6 +337,8 @@ facebook-pages-mcp-server serve-http
 |---|---|---|
 | `FB_PAGE_TOKEN` | yes | Facebook Page access token. Every Page tool acts with it. Never a tool parameter. |
 | `FB_USER_TOKEN` | no | User access token for `me/accounts` (`pages_list`, `pages_find`). Unset means those calls use `FB_PAGE_TOKEN`. |
+| `FB_APP_ID` | no | Meta app ID. Used only by `facebook_pages_refresh_token` and `refresh-token` to exchange a user token. Set both or neither. |
+| `FB_APP_SECRET` | no | Meta app secret. Sent only to the token exchange, never with a Page call. |
 | `FB_GRAPH_VERSION` | no | Graph API version (default `v27.0`). Accepts `v27.0` or `27.0`; a bare major such as `v27` is rejected by the API. Set it to the version your app was created on. |
 | `FB_GRAPH_BASE_URL` | no | Graph API base URL (default `https://graph.facebook.com`). Change only for a test double or proxy. |
 | `MCP_API_KEY` | for `serve-http` | Bearer token(s) clients must present to use *this* MCP server. Comma-separated list supported. |
@@ -343,7 +401,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.5.0"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.6.0"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with
@@ -404,11 +462,15 @@ this error is Graph naming the token's kind rather than a fault in the request.
 
 **Every call fails with code 190.** The Facebook token is the problem, not the
 code. An expired token says so and quotes the date Graph gave, for example
-`Session has expired on Friday, 13-Nov-26 14:00:00 PST`. Mint a new one as
-described under "Get a Page access token". Pass it to
+`Session has expired on Friday, 13-Nov-26 14:00:00 PST`. Pass a new one to
 `facebook_pages_set_token` to use it from now on, or name it as `access_token`
 with a single call to use it once. `facebook_pages_status` reports the expiry of
 the token in use, and `check` prints it before the server starts.
+
+A token that dies on a schedule is not fixed by replacing it again. Set
+`FB_APP_ID` and `FB_APP_SECRET` and call `facebook_pages_refresh_token`: it
+mints a Page token with no expiry. See
+[A Page token that never expires](#a-page-token-that-never-expires).
 
 ## Development
 
@@ -428,9 +490,10 @@ parameters, not only on the results.
 ```
 facebook_pages_mcp_server/
 ├── __init__.py      # package metadata
-├── __main__.py      # CLI: serve, serve-http, gen-key, check
+├── __main__.py      # CLI: serve, serve-http, gen-key, check, refresh-token
 ├── config.py        # environment variable handling
 ├── graph.py         # async Graph API client (httpx) + error handling
+├── refresh.py       # minting a Page token that does not expire
 ├── server.py        # MCPServer + tool registration + HTTP auth
 ├── specs.py         # catalog of every tool: tier, description, endpoint
 └── tokens.py        # token expiry and token-failure messages

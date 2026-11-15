@@ -14,6 +14,11 @@ Two Facebook tokens matter here:
   ``FB_PAGE_TOKEN``, which works when the Page token was created through a
   person who can perform the needed task.
 
+``FB_APP_ID`` and ``FB_APP_SECRET`` identify the Meta app. They do not
+authenticate Page calls, because Page endpoints require a Page access token. They
+let ``facebook_pages_refresh_token`` exchange a User token for a long-lived one,
+which is how a Page token that never expires is obtained.
+
 The MCP layer has its own credential, ``MCP_API_KEY``: the Bearer token
 clients must present to reach this server. It is unrelated to Facebook.
 """
@@ -31,7 +36,7 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 SERVER_NAME = "facebook-pages-mcp-server"
-SERVER_VERSION = "1.5.0"
+SERVER_VERSION = "1.6.0"
 
 DEFAULT_GRAPH_VERSION = "v27.0"
 DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com"
@@ -43,6 +48,8 @@ _VERSION_RE = re.compile(r"^v\d+\.\d+$")
 # Environment variable names
 ENV_PAGE_TOKEN = "FB_PAGE_TOKEN"
 ENV_USER_TOKEN = "FB_USER_TOKEN"
+ENV_APP_ID = "FB_APP_ID"
+ENV_APP_SECRET = "FB_APP_SECRET"
 ENV_GRAPH_VERSION = "FB_GRAPH_VERSION"
 ENV_GRAPH_BASE_URL = "FB_GRAPH_BASE_URL"
 ENV_VERIFY_SSL = "FB_VERIFY_SSL"
@@ -167,6 +174,8 @@ class Config:
 
     page_token: str
     user_token: str = ""
+    app_id: str = ""
+    app_secret: str = ""
     graph_version: str = DEFAULT_GRAPH_VERSION
     graph_base_url: str = DEFAULT_GRAPH_BASE_URL
     verify_ssl: bool = True
@@ -182,6 +191,15 @@ class Config:
     def allows_action(self, action: str) -> bool:
         """Whether a tool whose action tier is ``action`` (read/write/delete) is permitted."""
         return action in self.tool_permissions
+
+    @property
+    def app_credentials_configured(self) -> bool:
+        """Whether both app credentials are present.
+
+        The token exchange needs the App ID and the App Secret together, so a
+        half-set pair cannot do anything useful.
+        """
+        return bool(self.app_id and self.app_secret)
 
     @property
     def mcp_api_keys(self) -> tuple[str, ...]:
@@ -244,6 +262,8 @@ def load_config() -> Config:
     return Config(
         page_token=_env_str(ENV_PAGE_TOKEN, "") or "",
         user_token=_env_str(ENV_USER_TOKEN, "") or "",
+        app_id=_env_str(ENV_APP_ID, "") or "",
+        app_secret=_env_str(ENV_APP_SECRET, "") or "",
         graph_version=_normalize_version(_env_str(ENV_GRAPH_VERSION, DEFAULT_GRAPH_VERSION) or DEFAULT_GRAPH_VERSION),
         graph_base_url=(_env_str(ENV_GRAPH_BASE_URL, DEFAULT_GRAPH_BASE_URL) or DEFAULT_GRAPH_BASE_URL).rstrip("/"),
         verify_ssl=_env_bool(ENV_VERIFY_SSL, True),

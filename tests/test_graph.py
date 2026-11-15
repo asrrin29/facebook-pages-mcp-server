@@ -150,6 +150,27 @@ def test_multiple_mcp_api_keys_are_split():
     assert cfg.mcp_api_keys == ("key-one", "key-two")
 
 
+def test_app_credentials_are_read_from_the_environment(monkeypatch):
+    """Both app credentials are needed, and neither is enough on its own.
+
+    The token exchange authenticates as the app, so a half-set pair cannot do
+    anything. Reading them is what makes facebook_pages_refresh_token possible.
+    """
+    monkeypatch.setenv("FB_PAGE_TOKEN", "page-token")
+    monkeypatch.setenv("FB_APP_ID", "  1234567890  ")
+    monkeypatch.setenv("FB_APP_SECRET", "app-secret")
+    cfg = load_config()
+    assert cfg.app_id == "1234567890"
+    assert cfg.app_secret == "app-secret"
+    assert cfg.app_credentials_configured is True
+
+    monkeypatch.delenv("FB_APP_SECRET", raising=False)
+    cfg = load_config()
+    assert cfg.app_credentials_configured is False
+
+    assert _config().app_credentials_configured is False
+
+
 # ----------------------------------------------------------------------
 # Field selection
 # ----------------------------------------------------------------------
@@ -251,6 +272,70 @@ async def test_a_supplied_token_overrides_the_configured_one(graph):
         assert mock_graph.find_last("1001")["headers"]["authorization"] == (
             f"Bearer {mock_graph.FRESH_TOKEN}"
         )
+
+
+async def test_get_public_sends_no_bearer_token(graph):
+    """The token exchange authenticates with its parameters, not a bearer token.
+
+    ``oauth/access_token`` is rejected when it also carries an access token in the
+    Authorization header, so the request must go without one even though the
+    client normally has a token to send.
+    """
+    config = _config(
+        graph_base_url=graph.base_url,
+        app_id=mock_graph.APP_ID,
+        app_secret=mock_graph.APP_SECRET,
+    )
+    async with GraphClient(config) as client:
+        payload = await client.get_public(
+            "oauth/access_token",
+            {
+                "grant_type": "fb_exchange_token",
+                "client_id": config.app_id,
+                "client_secret": config.app_secret,
+                "fb_exchange_token": mock_graph.VALID_USER_TOKEN,
+            },
+        )
+    assert payload["access_token"] == mock_graph.LONG_LIVED_USER_TOKEN
+    entry = mock_graph.find_last("oauth/access_token")
+    assert entry["headers"]["authorization"] == ""
+    assert entry["query"]["grant_type"] == "fb_exchange_token"
+
+
+async def test_get_public_ignores_the_configured_token(graph):
+    """The exchange works while the configured token is dead.
+
+    The exchange is the step that produces a working Page token, so it cannot
+    depend on the one already configured being valid. That is the state a server
+    reaches when its token expires: the only way out runs without it.
+    """
+    config = _config(
+        graph_base_url=graph.base_url,
+        page_token=mock_graph.EXPIRED_TOKEN,
+        app_id=mock_graph.APP_ID,
+        app_secret=mock_graph.APP_SECRET,
+    )
+    async with GraphClient(config) as client:
+        payload = await client.get_public(
+            "oauth/access_token",
+            {
+                "grant_type": "fb_exchange_token",
+                "client_id": config.app_id,
+                "client_secret": config.app_secret,
+                "fb_exchange_token": mock_graph.VALID_USER_TOKEN,
+            },
+        )
+    assert payload["token_type"] == "bearer"
+    assert mock_graph.find_last("oauth/access_token")["headers"]["authorization"] == ""
+
+    # The same client still uses the configured token for an ordinary call, so
+    # sending no header is specific to the exchange.
+    async with GraphClient(config) as client:
+        with pytest.raises(GraphError):
+            await client.get("1001", {"fields": "id,name"})
+    assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+        f"Bearer {mock_graph.EXPIRED_TOKEN}"
+    )
 
 
 async def test_graph_error_fields_are_exposed(graph):

@@ -68,6 +68,10 @@ PAGE_FIELDS: tuple[str, ...] = (
 # so it is not requested.
 PAGE_SUMMARY_FIELDS: tuple[str, ...] = ("id", "name", "link", "username", "category")
 
+# Fields for the me/accounts call that mints a Page token. access_token is the
+# value wanted; id and name identify which Page it belongs to.
+PAGE_ACCESS_TOKEN_FIELDS: tuple[str, ...] = ("id", "name", "category", "access_token")
+
 # Fields for the /{page-id}/posts edge. `attachments` is left out: on this edge
 # Graph resolves it through a legacy aggregated-attachments path and the whole
 # request fails with error 12 ("deprecate_post_aggregated_fields_for_attachement
@@ -684,6 +688,27 @@ HELPER_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "replaces FB_PAGE_TOKEN, scope 'user' replaces FB_USER_TOKEN. The token "
             "is not written to the environment, so a restart goes back to the "
             "configured value. A token that debug_token rejects is not applied."
+        ),
+    ),
+    ToolSpec(
+        name="facebook_pages_refresh_token",
+        tier="helper",
+        summary="Mint a Page access token that does not expire, and use it now",
+        api="GET /oauth/access_token then GET me/accounts",
+        description=(
+            "Exchange a User access token for a long-lived one with the app's "
+            "credentials, read me/accounts with it, and use the Page token that "
+            "returns for every later call in this process. A Page token taken from "
+            "a long-lived User token has no expiry, so this is how to stop the "
+            "token expiring. Needs FB_APP_ID and FB_APP_SECRET, and a User token "
+            "that has not expired: pass user_token, or have FB_USER_TOKEN set. The "
+            "token is not written to the environment, so set FB_PAGE_TOKEN to keep "
+            "it after a restart."
+        ),
+        notes=(
+            "A User token cannot be exchanged after it has expired; a new one must "
+            "be obtained from the Graph API Explorer. The App Secret is sent only "
+            "to the token exchange, never with a Page call."
         ),
     ),
     ToolSpec(

@@ -138,6 +138,15 @@ class GraphClient:
             "GET", path.lstrip("/"), query=params, scope=scope, token=token
         )
 
+    async def get_public(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """GET a Graph path that authenticates through its parameters.
+
+        ``oauth/access_token`` carries the App ID, the App Secret, and the token
+        to exchange as query parameters. Graph rejects that request when it also
+        carries a bearer token, so no Authorization header is sent.
+        """
+        return await self._request("GET", path.lstrip("/"), query=params, auth=False)
+
     async def get_url(self, url: str, *, scope: str = "page", token: str | None = None) -> Any:
         """GET an absolute URL, used to follow ``paging.next`` links."""
         return await self._request("GET", url, scope=scope, token=token)
@@ -188,19 +197,24 @@ class GraphClient:
         form: dict[str, Any] | None = None,
         scope: str = "page",
         token: str | None = None,
+        auth: bool = True,
     ) -> Any:
         # A token given with the request is the token used, whatever the
         # configured value holds: a caller that has just minted a token must not
         # be blocked by a configured token that has expired. One rule for every
         # scope, so a token of the wrong kind for the endpoint is reported by
         # Graph rather than quietly replaced by a different credential.
-        resolved = token or _CALL_TOKEN.get() or self._config.token_for(scope)
-        if not resolved:
-            raise GraphError(
-                f"No Facebook access token configured for a {scope}-scoped call. "
-                f"Set {'FB_USER_TOKEN' if scope == 'user' else 'FB_PAGE_TOKEN'}."
-            )
-        headers = {"Authorization": f"Bearer {resolved}"}
+        # ``auth=False`` is for the OAuth endpoints that authenticate with their
+        # parameters, and must not be given a bearer token.
+        headers: dict[str, str] = {}
+        if auth:
+            resolved = token or _CALL_TOKEN.get() or self._config.token_for(scope)
+            if not resolved:
+                raise GraphError(
+                    f"No Facebook access token configured for a {scope}-scoped call. "
+                    f"Set {'FB_USER_TOKEN' if scope == 'user' else 'FB_PAGE_TOKEN'}."
+                )
+            headers["Authorization"] = f"Bearer {resolved}"
         clean_query = _clean(query)
         clean_form = _clean(form)
 

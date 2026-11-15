@@ -122,6 +122,7 @@ READ_ONLY_TOOLS = {
     "graph_follow",
     "facebook_pages_status",
     "facebook_pages_set_token",
+    "facebook_pages_refresh_token",
     "facebook_pages_list_tools",
 }
 
@@ -134,6 +135,7 @@ async def test_stdio_tool_list_and_calls(mock):
         expected = {
             "facebook_pages_status",
             "facebook_pages_set_token",
+            "facebook_pages_refresh_token",
             "facebook_pages_list_tools",
             "pages_list",
             "page_get",
@@ -149,7 +151,7 @@ async def test_stdio_tool_list_and_calls(mock):
             "post_delete",
         }
         assert expected <= names, f"missing tools: {expected - names}"
-        assert len(names) == 28  # 25 Graph tools + 3 helpers
+        assert len(names) == 29  # 25 Graph tools + 4 helpers
 
         # status checks the token live, so it reports expiry as well as presence
         data = _tool_text(await client.call_tool("facebook_pages_status", {}))
@@ -481,6 +483,387 @@ async def test_stdio_set_token_replaces_an_expired_token_without_restart(mock):
         assert "facebook_pages_set_token" in {t["tool"] for t in listed["tools"]}
 
 
+async def test_stdio_refresh_token_mints_a_page_token_that_does_not_expire(mock):
+    """One call replaces an expired Page token with one that has no expiry.
+
+    Every token used against the live Page was minted from a short-lived user
+    token, so every one died at a Pacific midnight. The exchange and the
+    me/accounts read are what produce a Page token that does not expire, and the
+    server can perform both itself when it holds the app credentials.
+    """
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    async with Client(_server_params(env)) as client:
+        assert (await client.call_tool("page_get", {"page_id": "1001"})).is_error
+
+        data = _tool_text(
+            await client.call_tool(
+                "facebook_pages_refresh_token",
+                {"user_token": mock_graph.VALID_USER_TOKEN, "page_id": "1001"},
+            )
+        )
+        assert data["applied"] is True
+        assert data["page"] == {"id": "1001", "name": "Prime Time IT"}
+        assert data["never_expires"] is True
+        assert data["token"]["is_valid"] is True
+        assert data["user_token_expires_at_utc"]
+
+        # The exchange is made as the app: grant type and app credentials in the
+        # query, and no bearer token, which Graph rejects on that endpoint.
+        exchanged = mock_graph.find_last("oauth/access_token")
+        assert exchanged["query"] == {
+            "grant_type": "fb_exchange_token",
+            "client_id": mock_graph.APP_ID,
+            "client_secret": mock_graph.APP_SECRET,
+            "fb_exchange_token": mock_graph.VALID_USER_TOKEN,
+        }
+        assert exchanged["headers"]["authorization"] == ""
+
+        # The Page token is read with the long-lived user token, and only because
+        # the call asked for the access_token field.
+        accounts = mock_graph.find_last("me/accounts")
+        assert "access_token" in accounts["query"]["fields"]
+        assert accounts["headers"]["authorization"] == (
+            f"Bearer {mock_graph.LONG_LIVED_USER_TOKEN}"
+        )
+
+        # Later calls use the new Page token, with no restart.
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["name"] == "Prime Time IT"
+        assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.MINTED_PAGE_TOKEN}"
+        )
+
+        # Status reports the new token as working and never expiring.
+        status = _tool_text(await client.call_tool("facebook_pages_status", {}))
+        assert status["ready"] is True
+        assert status["token"]["never_expires"] is True
+
+        # The self-reported manifest lists the tool.
+        listed = _tool_text(await client.call_tool("facebook_pages_list_tools", {}))
+        assert "facebook_pages_refresh_token" in {t["tool"] for t in listed["tools"]}
+
+
+async def test_stdio_refresh_token_names_what_is_missing(mock):
+    """A refresh that cannot run says which setting or token is absent."""
+    # No app credentials: the exchange authenticates as the app, so it cannot run.
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN)
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool(
+            "facebook_pages_refresh_token", {"user_token": mock_graph.VALID_USER_TOKEN}
+        )
+        assert result.is_error
+        assert "FB_APP_ID" in result.content[0].text
+        assert "FB_APP_SECRET" in result.content[0].text
+
+        # App credentials passed with the call are enough.
+        data = _tool_text(
+            await client.call_tool(
+                "facebook_pages_refresh_token",
+                {
+                    "user_token": mock_graph.VALID_USER_TOKEN,
+                    "page_id": "1001",
+                    "app_id": mock_graph.APP_ID,
+                    "app_secret": mock_graph.APP_SECRET,
+                },
+            )
+        )
+        assert data["applied"] is True
+        assert data["never_expires"] is True
+
+    # No user token: a Page token has no accounts edge, so it cannot be refreshed
+    # on its own. This is the confusion the tool has to answer in words.
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool("facebook_pages_refresh_token", {})
+        assert result.is_error
+        assert "No User access token to exchange" in result.content[0].text
+        assert "user_token" in result.content[0].text
+
+
+async def test_stdio_refresh_token_keeps_the_old_token_when_the_exchange_fails(mock):
+    """An expired user token cannot be exchanged, and nothing may change.
+
+    Graph refuses to exchange a token that has expired. A refresh that fails must
+    leave the server exactly as it was, rather than installing a token it never
+    obtained.
+    """
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+        FB_USER_TOKEN=mock_graph.EXPIRED_TOKEN,
+    )
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool("facebook_pages_refresh_token", {})
+        assert result.is_error
+        assert "EXPIRED on Friday, 13-Nov-26 14:00:00 PST" in result.content[0].text
+
+        # The configured Page token still works, untouched.
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["name"] == "Prime Time IT"
+        assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.VALID_TOKEN}"
+        )
+
+
+async def test_stdio_refresh_token_asks_which_page_when_several_are_managed(mock):
+    """With more than one Page, the caller has to name the one it wants."""
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+        FB_USER_TOKEN=mock_graph.VALID_USER_TOKEN,
+    )
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool("facebook_pages_refresh_token", {})
+        assert result.is_error
+        assert "manages 2 Pages" in result.content[0].text
+        assert "page_id" in result.content[0].text
+        assert "Helpdesk Hotline" in result.content[0].text
+
+        # A Page the token does not manage is named as such, with the choices.
+        result = await client.call_tool(
+            "facebook_pages_refresh_token", {"page_id": "9999"}
+        )
+        assert result.is_error
+        assert "no Page with id 9999" in result.content[0].text
+        assert "Prime Time IT" in result.content[0].text
+
+        # Naming one works.
+        data = _tool_text(
+            await client.call_tool(
+                "facebook_pages_refresh_token", {"page_id": "1002"}
+            )
+        )
+        assert data["page"] == {"id": "1002", "name": "Helpdesk Hotline"}
+
+
+async def test_stdio_refresh_token_rolls_back_a_page_token_that_is_already_expired(mock):
+    """A Page token that is already past its expiry must not be installed.
+
+    An exchange against credentials that do not match the Page can return a token
+    that is dead on arrival. Installing it would leave every later call failing,
+    which is worse than the state before the call.
+    """
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool(
+            "facebook_pages_refresh_token",
+            {"user_token": mock_graph.DEAD_RESULT_USER_TOKEN, "page_id": "1001"},
+        )
+        assert result.is_error
+        assert "already expired" in result.content[0].text
+
+        # The token that worked before the call still works.
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["name"] == "Prime Time IT"
+        assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.VALID_TOKEN}"
+        )
+
+
+async def test_stdio_refresh_token_says_when_no_page_is_managed(mock):
+    """A user token that manages no Page cannot produce a Page token."""
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool(
+            "facebook_pages_refresh_token",
+            {"user_token": mock_graph.NO_PAGES_USER_TOKEN},
+        )
+        assert result.is_error
+        assert "returned no Pages" in result.content[0].text
+
+        # Nothing was changed.
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["name"] == "Prime Time IT"
+
+
+async def test_stdio_refresh_token_reports_a_page_token_that_still_expires(mock):
+    """When the exchange does not produce a long-lived token, say so plainly.
+
+    The result is still usable now, so it is applied, but the caller has to know it
+    will expire. Silent success here is what leads to the token dying again.
+    """
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    async with Client(_server_params(env)) as client:
+        data = _tool_text(
+            await client.call_tool(
+                "facebook_pages_refresh_token",
+                {"user_token": mock_graph.SHORT_LIVED_USER_TOKEN, "page_id": "1001"},
+            )
+        )
+        assert data["applied"] is True
+        assert data["never_expires"] is False
+        assert "still has an expiry" in data["note"]
+        assert data["token"]["expired"] is False
+
+
+async def test_stdio_refresh_token_says_when_a_page_carries_no_token(mock):
+    """A user token that may list Pages but not act on them cannot mint one.
+
+    me/accounts returns the Pages without an access_token in that case. Naming the
+    missing permission is the difference between retrying and re-issuing the token.
+    """
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool(
+            "facebook_pages_refresh_token",
+            {"user_token": mock_graph.NO_PAGE_PERMISSION_USER_TOKEN, "page_id": "1001"},
+        )
+        assert result.is_error
+        assert "no access_token for Page 1001" in result.content[0].text
+        assert "pages_show_list" in result.content[0].text
+
+        page = _tool_text(await client.call_tool("page_get", {"page_id": "1001"}))
+        assert page["name"] == "Prime Time IT"
+
+
+async def _run_cli(env: dict[str, str], *args: str) -> tuple[int, str, str]:
+    """Run the command line in a real process, so argument wiring is covered.
+
+    The mock Graph API is served in this test process, so the subprocess must be
+    awaited rather than run synchronously: blocking here would stop the mock from
+    answering.
+    """
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "facebook_pages_mcp_server",
+        *args,
+        env=env,
+        cwd=PROJECT_ROOT,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+    return process.returncode, stdout.decode(), stderr.decode()
+
+
+async def test_cli_refresh_token_prints_a_token_to_store(mock):
+    """The command line can mint the permanent token without a running server.
+
+    Minting this token by hand is several curl calls. The command exists so the
+    step is one invocation, and the value has to be printed to be stored.
+    """
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN,
+        FB_USER_TOKEN=mock_graph.VALID_USER_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    code, out, err = await _run_cli(env, "refresh-token", "--page", "1001")
+    assert code == 0, err
+    assert mock_graph.MINTED_PAGE_TOKEN in out
+    assert "Expiry:        none" in out
+    assert "Set this as FB_PAGE_TOKEN" in out
+
+    # The exchange ran as the app, with no bearer token.
+    exchanged = mock_graph.find_last("oauth/access_token")
+    assert exchanged["headers"]["authorization"] == ""
+    assert exchanged["query"]["client_id"] == mock_graph.APP_ID
+
+
+async def test_cli_refresh_token_says_why_it_cannot_run(mock):
+    """Missing app credentials are named on stderr, with a non-zero exit."""
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
+        FB_USER_TOKEN=mock_graph.VALID_USER_TOKEN,
+    )
+    code, out, err = await _run_cli(env, "refresh-token", "--page", "1001")
+    assert code == 1
+    assert "FB_APP_ID" in err
+    assert "FB_APP_SECRET" in err
+
+
+async def test_stdio_status_points_at_the_refresh_when_it_can_run(mock):
+    """An expired token is reported with the fix that ends the expiry churn.
+
+    The reported failure was a token that died every night. A status that says
+    only "expired" sends the reader back to minting short-lived tokens.
+    """
+    env = _env(
+        mock,
+        FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN,
+        FB_APP_ID=mock_graph.APP_ID,
+        FB_APP_SECRET=mock_graph.APP_SECRET,
+    )
+    async with Client(_server_params(env)) as client:
+        data = _tool_text(await client.call_tool("facebook_pages_status", {}))
+        assert data["ready"] is False
+        assert data["app_credentials_configured"] is True
+        assert "facebook_pages_refresh_token" in data["hint"]
+
+        # Without app credentials the hint says what to set to unlock it.
+        env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN)
+        async with Client(_server_params(env)) as client:
+            data = _tool_text(await client.call_tool("facebook_pages_status", {}))
+            assert data["app_credentials_configured"] is False
+            assert "FB_APP_ID" in data["hint"]
+
+
+async def test_stdio_an_expired_token_suggests_the_refresh_tool(mock):
+    """The token error text names the tool that can fix it without a restart."""
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN)
+    async with Client(_server_params(env)) as client:
+        result = await client.call_tool("page_get", {"page_id": "1001"})
+        assert result.is_error
+        assert "facebook_pages_refresh_token" in result.content[0].text
+
+
+async def test_stdio_user_token_argument_is_not_forwarded_to_graph(mock):
+    """A client that names a credential `user_token` must not leak it to Graph.
+
+    `user_token` is accepted as an alias for the per-call token, so no tool may
+    send it to Facebook as a parameter.
+    """
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN)
+    async with Client(_server_params(env)) as client:
+        data = _tool_text(
+            await client.call_tool(
+                "page_get",
+                {"page_id": "1001", "user_token": mock_graph.FRESH_TOKEN},
+            )
+        )
+        assert data["name"] == "Prime Time IT"
+        sent = mock_graph.find_last("1001")
+        assert sent["headers"]["authorization"] == f"Bearer {mock_graph.FRESH_TOKEN}"
+        assert "user_token" not in sent["query"]
+
+
 async def test_stdio_a_token_supplied_with_a_call_reaches_the_request_layer(mock):
     """A token passed with a request must be the token that request uses.
 
@@ -546,12 +929,18 @@ async def test_stdio_a_token_supplied_with_a_call_reaches_the_request_layer(mock
         )
 
         # Every tool advertises the parameter, so a client following the schema
-        # can supply a token. set_token is excluded: it declares it itself.
+        # can supply a token. Tools that declare a token argument themselves are
+        # excluded: for them that name carries a different credential.
         listed = await client.list_tools()
         for tool in listed.tools:
             properties = tool.input_schema["properties"]
             if tool.name == "facebook_pages_set_token":
                 assert properties["access_token"]["type"] == "string"
+                continue
+            if tool.name == "facebook_pages_refresh_token":
+                # The credential this tool acts on is a user token, so that is the
+                # name it advertises.
+                assert "user_token" in properties
                 continue
             assert "access_token" in properties, tool.name
 
@@ -672,7 +1061,7 @@ async def _tool_names(mock, **extra) -> set[str]:
 
 
 async def test_stdio_read_only_by_default(mock):
-    # No MCP_TOOL_PERMISSIONS set -> read-only: 18 read tools + 2 helpers.
+    # No MCP_TOOL_PERMISSIONS set -> read-only: 18 read tools + 3 helpers.
     names = await _tool_names(mock)
     assert names == READ_ONLY_TOOLS
     assert "page_publish" not in names
@@ -689,7 +1078,7 @@ async def test_stdio_read_write_permissions(mock):
 async def test_stdio_delete_permission_exposes_delete_tools(mock):
     names = await _tool_names(mock, MCP_TOOL_PERMISSIONS="read,write,delete")
     assert {"comment_delete", "post_delete"} <= names
-    assert len(names) == 28
+    assert len(names) == 29
 
 
 async def test_stdio_status_reports_permissions(mock):

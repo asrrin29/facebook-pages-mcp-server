@@ -40,6 +40,7 @@ from mcp.types import ToolAnnotations
 
 from .config import SERVER_NAME, SERVER_VERSION, Config
 from .graph import GraphClient, GraphError, call_token as graph_call_token, current_call_token
+from .refresh import RefreshError, mint_page_token
 from .tokens import describe_token_error, token_state
 from .specs import (
     ALBUM_FIELDS,
@@ -143,8 +144,29 @@ class ServerState:
 # never sent to Facebook and the failure reads as "the token was not accepted".
 # The advertised schema still names only `access_token`; these alternatives are
 # accepted on the way in. `access_token` is listed first, so a call that supplies
-# two of them uses the canonical name.
-TOKEN_ARGUMENT_NAMES = ("access_token", "token", "page_token", "accessToken", "fb_access_token")
+# two of them uses the canonical name. `user_token` is included so a client that
+# means "use this credential" is understood by any tool; only
+# facebook_pages_refresh_token acts on a User token rather than a Page token.
+TOKEN_ARGUMENT_NAMES = (
+    "access_token",
+    "token",
+    "page_token",
+    "accessToken",
+    "fb_access_token",
+    "user_token",
+)
+
+# Tools that declare token-named arguments themselves, because keeping or
+# exchanging the token is their job. For them the per-call handling below must
+# leave the argument alone, and the advertised schema must not describe it as a
+# throwaway credential.
+TOKEN_TOOLS_WITH_OWN_ARGUMENTS = ("facebook_pages_set_token", "facebook_pages_refresh_token")
+
+# Accepted names for the User token a token exchange runs on.
+UserTokenAlias = Annotated[
+    str | None,
+    Field(validation_alias=AliasChoices("user_token", "userToken", "access_token", "token")),
+]
 
 TokenAlias = Annotated[
     str,
@@ -298,15 +320,36 @@ def _advertise_call_token(mcp: MCPServer) -> None:
 
     The parameter is handled before any tool runs, so it is absent from the tool
     signatures and would otherwise be invisible to a client that follows the
-    advertised schema. ``facebook_pages_set_token`` is skipped: it declares the
-    parameter itself, because its job is to keep the token.
+    advertised schema. Tools that declare a token argument themselves are skipped:
+    for them that name means something else.
     """
     for tool in mcp._tool_manager.list_tools():
-        if tool.name == "facebook_pages_set_token":
+        if tool.name in TOKEN_TOOLS_WITH_OWN_ARGUMENTS:
             continue
         properties = tool.parameters.get("properties")
         if isinstance(properties, dict):
             properties["access_token"] = dict(CALL_TOKEN_SCHEMA)
+
+
+def _expired_token_hint(config: Config) -> str:
+    """How to replace a token this server can no longer use.
+
+    The names offered depend on what is configured. With the app credentials the
+    server can mint a replacement that never expires, which is the only option
+    that ends a token expiring on a schedule.
+    """
+    if config.app_credentials_configured:
+        return (
+            "The configured token has expired. Call facebook_pages_refresh_token to "
+            "mint a Page token that does not expire, or pass a new token to "
+            "facebook_pages_set_token."
+        )
+    return (
+        "The configured token has expired. Pass a new token to "
+        "facebook_pages_set_token, or set FB_PAGE_TOKEN and restart. To end the "
+        "expiry churn, set FB_APP_ID and FB_APP_SECRET and call "
+        "facebook_pages_refresh_token: it mints a Page token that does not expire."
+    )
 
 
 def _permission_summary(config: Config) -> str:
@@ -777,6 +820,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             "server_version": SERVER_VERSION,
             "page_token_configured": bool(cfg.page_token),
             "user_token_configured": bool(cfg.user_token),
+            "app_credentials_configured": cfg.app_credentials_configured,
             "tool_permissions": list(cfg.tool_permissions),
             "verify_ssl": cfg.verify_ssl,
             "timeout_seconds": cfg.timeout_seconds,
@@ -808,14 +852,15 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         except ToolError as exc:
             info["ready"] = False
             info["token"] = {"ok": False, "error": str(exc)}
+            # An expired configured token fails here: debug_token cannot be called
+            # with it. The hint belongs on this path as much as on the one where
+            # the call succeeds and reports an expiry.
+            info["hint"] = _expired_token_hint(cfg)
             return info
         info["token"] = {"ok": True, **token_state(payload)}
         if info["token"].get("expired"):
             info["ready"] = False
-            info["hint"] = (
-                "The configured token has expired. Mint a new one and pass it to "
-                "facebook_pages_set_token, or set FB_PAGE_TOKEN and restart."
-            )
+            info["hint"] = _expired_token_hint(cfg)
         return info
 
     async def facebook_pages_set_token(
@@ -877,6 +922,66 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             ),
         }
 
+    async def facebook_pages_refresh_token(
+        page_id: str | None = None,
+        user_token: UserTokenAlias = None,
+        app_id: str | None = None,
+        app_secret: str | None = None,
+    ) -> dict[str, Any]:
+        """Mint a Page token that does not expire, and use it for this process."""
+        cfg = state.config
+        supplied = _normalize_token(user_token) if user_token else ""
+        try:
+            minted = await state.call(
+                lambda c: mint_page_token(
+                    c,
+                    app_id=(app_id or cfg.app_id or "").strip(),
+                    app_secret=(app_secret or cfg.app_secret or "").strip(),
+                    user_token=supplied or cfg.user_token,
+                    page_id=page_id,
+                )
+            )
+        except RefreshError as exc:
+            raise ToolError(str(exc)) from exc
+
+        report = minted["token"]
+        # A token that debug_token rejects, or that is already past its expiry, is
+        # not worth installing: the previous token is better than a broken one.
+        if not report["is_valid"]:
+            raise ToolError(
+                "debug_token reports the new Page token is not valid, so it was not "
+                "applied. The previous token is still in use."
+            )
+        if report["expired"]:
+            raise ToolError(
+                f"The new Page token is already expired at {report['expires_at_utc']}, "
+                "so it was not applied. The previous token is still in use."
+            )
+
+        await state.use_token("page", minted["page_token"])
+
+        logger.info(
+            "Minted a Page access token for %s that %s",
+            minted["page"]["id"],
+            "does not expire" if report["never_expires"] else "expires later",
+        )
+        minted["applied"] = True
+        minted["never_expires"] = report["never_expires"]
+        minted["note"] = (
+            "Every later call in this process uses the new Page token, which does "
+            "not expire. Set page_token above as FB_PAGE_TOKEN to keep it after a "
+            "restart; without that, a restart goes back to the configured value."
+            if report["never_expires"]
+            else (
+                "This Page token still has an expiry, so the User token it came from "
+                "was not a long-lived one. It is applied now, but it will expire. "
+                "Confirm FB_APP_ID and FB_APP_SECRET belong to the app that issued "
+                "the User token, and exchange a User token that has not expired."
+            )
+        )
+        return minted
+
+
     async def facebook_pages_list_tools() -> dict[str, Any]:
         return {
             "tool_permissions": list(state.config.tool_permissions),
@@ -925,6 +1030,7 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         "post_delete": post_delete,
         "facebook_pages_status": facebook_pages_status,
         "facebook_pages_set_token": facebook_pages_set_token,
+        "facebook_pages_refresh_token": facebook_pages_refresh_token,
         "facebook_pages_list_tools": facebook_pages_list_tools,
     }
 
@@ -964,10 +1070,11 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         arguments: dict[str, Any],
         context: Any = None,
     ) -> Any:
-        # facebook_pages_set_token declares the parameter itself, because keeping
-        # the token is its job. Every other tool has it removed here so no tool
-        # can forward it to Graph as a parameter named access_token.
-        token = None if name == "facebook_pages_set_token" else _extract_call_token(arguments)
+        # Tools that keep or exchange a token declare the argument themselves. For
+        # every other tool the token is removed here, so no tool can forward it to
+        # Graph as a parameter named access_token.
+        skip = name in TOKEN_TOOLS_WITH_OWN_ARGUMENTS
+        token = None if skip else _extract_call_token(arguments)
         with graph_call_token(token):
             return await call_tool(name, arguments, context)
 

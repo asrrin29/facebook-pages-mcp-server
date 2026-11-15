@@ -26,8 +26,59 @@ VALID_USER_TOKEN = "mock-user-token"
 FRESH_TOKEN = "mock-fresh-page-token"
 # A token whose session has ended. Graph rejects it on every endpoint.
 EXPIRED_TOKEN = "mock-expired-page-token"
+# The long-lived user token returned by the token exchange, and the Page token
+# me/accounts hands out when it is asked for with that token.
+LONG_LIVED_USER_TOKEN = "mock-long-lived-user-token"
+MINTED_PAGE_TOKEN = "mock-minted-page-token"
+# A Page token read with a short-lived user token: it carries an expiry.
+SHORT_LIVED_PAGE_TOKEN = "mock-minted-page-token-2"
+# A user token that exchanges, but into another short-lived one, so the Page
+# token read with it still has an expiry. DEAD_MINTED_PAGE_TOKEN is the Page token
+# of an exchange whose result is already past its expiry.
+SHORT_LIVED_USER_TOKEN = "mock-short-lived-user-token"
+DEAD_MINTED_PAGE_TOKEN = "mock-minted-page-token-dead"
+# A user token that exchanges, but whose app does not match the Page: the Page
+# token it produces is already past its expiry.
+DEAD_RESULT_USER_TOKEN = "mock-user-token-dead-result"
+# A user token for a person who manages no Page.
+NO_PAGES_USER_TOKEN = "mock-user-token-without-pages"
+# A user token that lists its Pages but is not allowed to act on them, so the
+# entries carry no access_token.
+NO_PAGE_PERMISSION_USER_TOKEN = "mock-user-token-without-page-permission"
 
-ACCEPTED_TOKENS = {VALID_TOKEN, FRESH_TOKEN}
+# What each accepted user token exchanges into. Only the first two produce a
+# long-lived token, which is what makes a Page token without an expiry.
+EXCHANGED_USER_TOKENS = {
+    VALID_USER_TOKEN: LONG_LIVED_USER_TOKEN,
+    LONG_LIVED_USER_TOKEN: LONG_LIVED_USER_TOKEN,
+    SHORT_LIVED_USER_TOKEN: "mock-still-short-lived-user-token",
+    DEAD_RESULT_USER_TOKEN: "mock-long-lived-user-token-dead",
+    NO_PAGES_USER_TOKEN: "mock-long-lived-user-token-no-pages",
+    NO_PAGE_PERMISSION_USER_TOKEN: "mock-long-lived-user-token-no-permission",
+}
+# The Page token me/accounts hands out for a given user token. A token that is not
+# listed manages no Page, so the edge returns nothing.
+PAGE_TOKENS_BY_USER_TOKEN = {
+    LONG_LIVED_USER_TOKEN: MINTED_PAGE_TOKEN,
+    "mock-still-short-lived-user-token": SHORT_LIVED_PAGE_TOKEN,
+    "mock-long-lived-user-token-dead": DEAD_MINTED_PAGE_TOKEN,
+}
+
+APP_ID = "1234567890"
+APP_SECRET = "mock-app-secret"
+
+ACCEPTED_TOKENS = {
+    VALID_TOKEN,
+    FRESH_TOKEN,
+    MINTED_PAGE_TOKEN,
+    SHORT_LIVED_PAGE_TOKEN,
+    DEAD_MINTED_PAGE_TOKEN,
+    LONG_LIVED_USER_TOKEN,
+    "mock-still-short-lived-user-token",
+    "mock-long-lived-user-token-dead",
+    "mock-long-lived-user-token-no-pages",
+    "mock-long-lived-user-token-no-permission",
+}
 
 PAGES = [
     {
@@ -77,6 +128,9 @@ DEBUG_TOKEN = {
 # A Page token from a long-lived user token has no expiry, which debug_token
 # reports as expires_at 0.
 DEBUG_TOKEN_NO_EXPIRY = {**DEBUG_TOKEN, "data": {**DEBUG_TOKEN["data"], "expires_at": 0}}
+
+# A token whose expiry has already passed.
+DEBUG_TOKEN_ALREADY_PAST = {**DEBUG_TOKEN, "data": {**DEBUG_TOKEN["data"], "expires_at": 1000000000}}
 
 # Metrics the API rejects on the current version. One rejected metric fails the
 # whole Insights request, so the mock applies the same rule.
@@ -217,7 +271,18 @@ async def _dispatch(request: Request) -> JSONResponse:
             return err
         if segments[-1] == "next-page":
             return JSONResponse({"data": PAGES[:1]})
-        return JSONResponse({"data": PAGES, "paging": {"next": _next_url(request, f"/{version}/me/accounts/next-page")}})
+        bearer = request.headers.get("authorization", "").partition(" ")[2]
+        pages = [] if bearer == "mock-long-lived-user-token-no-pages" else PAGES
+        if "access_token" in request.query_params.get("fields", ""):
+            # Graph hands out a Page token per Page when the fields ask for one.
+            # That token inherits the lifetime of the user token making the call:
+            # a long-lived one yields a Page token with no expiry, a short-lived
+            # one yields a Page token that expires. A user token that may not act
+            # on the Pages lists them without any access_token at all.
+            if bearer != "mock-long-lived-user-token-no-permission":
+                token = PAGE_TOKENS_BY_USER_TOKEN.get(bearer, SHORT_LIVED_PAGE_TOKEN)
+                pages = [{**page, "access_token": token} for page in pages]
+        return JSONResponse({"data": pages, "paging": {"next": _next_url(request, f"/{version}/me/accounts/next-page")}})
 
     # ---------------- batch ----------------
     # Batch requests are POSTed to the version root, with the array in the
@@ -258,6 +323,41 @@ async def _dispatch(request: Request) -> JSONResponse:
                 results.append({"code": 200, "body": json.dumps({"id": entry_path.split("/")[0]})})
         return JSONResponse(results)
 
+    # ---------------- token exchange ----------------
+    # The exchange authenticates as the app, through client_id and client_secret.
+    # Graph accepts a bearer token here, so the absence of one is checked through
+    # the recorded request rather than by rejecting it.
+    if segments[0] == "oauth" and segments[-1] == "access_token":
+        query = request.query_params
+        if query.get("grant_type") != "fb_exchange_token":
+            return _graph_error(
+                "Missing required parameter: grant_type must be fb_exchange_token.",
+                100,
+                "OAuthException",
+            )
+        if query.get("client_id") != APP_ID or query.get("client_secret") != APP_SECRET:
+            return _graph_error(
+                "Invalid app secret given.", 190, "OAuthException", subcode=458
+            )
+        if query.get("fb_exchange_token") == EXPIRED_TOKEN:
+            return _graph_error(
+                "Error validating access token: Session has expired on Friday, "
+                "13-Nov-26 14:00:00 PST. The current time is Saturday, 14-Nov-26 "
+                "09:53:26 PST.",
+                190,
+                "OAuthException",
+                subcode=463,
+            )
+        if query.get("fb_exchange_token") not in EXCHANGED_USER_TOKENS:
+            return _graph_error("Invalid OAuth access token - cannot parse it.", 104, "OAuthException")
+        return JSONResponse(
+            {
+                "access_token": EXCHANGED_USER_TOKENS[query["fb_exchange_token"]],
+                "token_type": "bearer",
+                "expires_in": 5183944,
+            }
+        )
+
     # ---------------- token debugging ----------------
     if segments[0] == "debug_token":
         global _rate_limited_calls
@@ -273,6 +373,16 @@ async def _dispatch(request: Request) -> JSONResponse:
             return _graph_error("Application total call limit exceeded.", 4, "OAuthException")
         if request.query_params.get("input_token") == FRESH_TOKEN:
             return JSONResponse(DEBUG_TOKEN_NO_EXPIRY)
+        if request.query_params.get("input_token") == MINTED_PAGE_TOKEN:
+            # A Page token read with a long-lived user token: no expiry.
+            return JSONResponse(DEBUG_TOKEN_NO_EXPIRY)
+        if request.query_params.get("input_token") == SHORT_LIVED_PAGE_TOKEN:
+            # A Page token read with a short-lived user token still has an expiry.
+            return JSONResponse(DEBUG_TOKEN)
+        if request.query_params.get("input_token") == DEAD_MINTED_PAGE_TOKEN:
+            # The expiry is already past, which is what an exchange against the
+            # wrong app can produce.
+            return JSONResponse(DEBUG_TOKEN_ALREADY_PAST)
         return JSONResponse(DEBUG_TOKEN)
 
     # ---------------- node writes ----------------

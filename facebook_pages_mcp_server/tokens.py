@@ -37,8 +37,10 @@ _EXPIRED_HINT = (
     "the user token for a long-lived one (GET /oauth/access_token with "
     "grant_type=fb_exchange_token), then call me/accounts with it and use the "
     "access_token returned for the Page: a Page token from a long-lived user token "
-    "does not expire. Pass the new token to facebook_pages_set_token to use it at "
-    "once, or set FB_PAGE_TOKEN and restart the server."
+    "does not expire. facebook_pages_refresh_token performs those steps when "
+    "FB_APP_ID and FB_APP_SECRET are set. Otherwise pass the new token to "
+    "facebook_pages_set_token to use it at once, or set FB_PAGE_TOKEN and restart "
+    "the server."
 )
 
 _TOKEN_ERROR_HINT = (

@@ -11,6 +11,10 @@ services:
       # --- Facebook (FB_PAGE_TOKEN is required) ---
       FB_PAGE_TOKEN: "${FB_PAGE_TOKEN:?set FB_PAGE_TOKEN in .env}"
       FB_USER_TOKEN: "${FB_USER_TOKEN:-}"
+      # Optional. Set both to let facebook_pages_refresh_token mint a Page token
+      # that does not expire.
+      FB_APP_ID: "${FB_APP_ID:-}"
+      FB_APP_SECRET: "${FB_APP_SECRET:-}"
       FB_GRAPH_VERSION: "${FB_GRAPH_VERSION:-v27.0}"
       FB_GRAPH_BASE_URL: "${FB_GRAPH_BASE_URL:-https://graph.facebook.com}"
       FB_VERIFY_SSL: "${FB_VERIFY_SSL:-true}"
