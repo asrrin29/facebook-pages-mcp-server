@@ -835,6 +835,36 @@ async def test_stdio_status_points_at_the_refresh_when_it_can_run(mock):
             assert "FB_APP_ID" in data["hint"]
 
 
+async def test_stdio_status_names_the_missing_app_credential(mock):
+    """A half-set app pair is reported as incomplete, not as configured.
+
+    Graph accepts the App ID and then rejects the empty secret, so a caller who
+    set only one reads the failure as a wrong secret. Naming the variable that is
+    empty is what makes the token that never expires reachable in one step.
+    """
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.VALID_TOKEN, FB_APP_ID=mock_graph.APP_ID)
+    async with Client(_server_params(env)) as client:
+        data = _tool_text(await client.call_tool("facebook_pages_status", {}))
+        assert data["app_credentials_configured"] is False
+        assert data["missing_app_credential"] == "FB_APP_SECRET"
+
+        # A complete pair, and an absent pair, both report nothing missing.
+        env = _env(
+            mock,
+            FB_PAGE_TOKEN=mock_graph.VALID_TOKEN,
+            FB_APP_ID=mock_graph.APP_ID,
+            FB_APP_SECRET=mock_graph.APP_SECRET,
+        )
+        async with Client(_server_params(env)) as client:
+            data = _tool_text(await client.call_tool("facebook_pages_status", {}))
+            assert "missing_app_credential" not in data
+
+        env = _env(mock, FB_PAGE_TOKEN=mock_graph.VALID_TOKEN)
+        async with Client(_server_params(env)) as client:
+            data = _tool_text(await client.call_tool("facebook_pages_status", {}))
+            assert "missing_app_credential" not in data
+
+
 async def test_stdio_an_expired_token_suggests_the_refresh_tool(mock):
     """The token error text names the tool that can fix it without a restart."""
     env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN)

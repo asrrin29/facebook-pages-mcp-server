@@ -821,6 +821,13 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             "page_token_configured": bool(cfg.page_token),
             "user_token_configured": bool(cfg.user_token),
             "app_credentials_configured": cfg.app_credentials_configured,
+            # Naming the empty variable matters: an exchange that carries only one
+            # of the pair is answered by Graph as a bad secret, not a missing one.
+            **(  # only when exactly one of the pair is set
+                {"missing_app_credential": cfg.missing_app_credential}
+                if cfg.missing_app_credential
+                else {}
+            ),
             "tool_permissions": list(cfg.tool_permissions),
             "verify_ssl": cfg.verify_ssl,
             "timeout_seconds": cfg.timeout_seconds,

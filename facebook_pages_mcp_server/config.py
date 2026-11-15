@@ -202,6 +202,19 @@ class Config:
         return bool(self.app_id and self.app_secret)
 
     @property
+    def missing_app_credential(self) -> str | None:
+        """The name of the app credential that is absent, when only one is set.
+
+        A half-set pair looks configured and still cannot exchange a token. Graph
+        accepts the App ID and then rejects the empty secret, which reads as a
+        wrong secret rather than a missing one. Naming the variable that is empty
+        is the difference between checking a value and finding it unset.
+        """
+        if bool(self.app_id) == bool(self.app_secret):
+            return None
+        return ENV_APP_ID if not self.app_id else ENV_APP_SECRET
+
+    @property
     def mcp_api_keys(self) -> tuple[str, ...]:
         """All configured MCP API keys (MCP_API_KEY may hold a comma-separated list)."""
         return tuple(k.strip() for k in self.mcp_api_key.split(",") if k.strip())

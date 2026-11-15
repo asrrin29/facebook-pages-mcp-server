@@ -167,8 +167,18 @@ def test_app_credentials_are_read_from_the_environment(monkeypatch):
     monkeypatch.delenv("FB_APP_SECRET", raising=False)
     cfg = load_config()
     assert cfg.app_credentials_configured is False
+    # Graph answers a half-set pair as a bad secret, so the name of the variable
+    # that is empty is the only useful thing to report.
+    assert cfg.missing_app_credential == "FB_APP_SECRET"
+
+    monkeypatch.delenv("FB_APP_ID", raising=False)
+    assert load_config().missing_app_credential is None
+
+    monkeypatch.setenv("FB_APP_SECRET", "app-secret")
+    assert load_config().missing_app_credential == "FB_APP_ID"
 
     assert _config().app_credentials_configured is False
+    assert _config().missing_app_credential is None
 
 
 # ----------------------------------------------------------------------

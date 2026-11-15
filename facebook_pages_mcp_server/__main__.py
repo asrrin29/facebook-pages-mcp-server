@@ -21,6 +21,8 @@ from contextlib import asynccontextmanager
 
 from . import __version__
 from .config import (
+    ENV_APP_ID,
+    ENV_APP_SECRET,
     ENV_MCP_API_KEY,
     SERVER_NAME,
     Config,
@@ -65,6 +67,20 @@ async def _cmd_check(config: Config) -> int:
     print(f"Graph API root:  {config.api_root}")
     print(f"Page token:      {'set' if config.page_token else 'MISSING'}")
     print(f"User token:      {'set' if config.user_token else 'not set (Page token will be used for /me edges)'}")
+    # A half-set app pair cannot exchange a token, and Graph then reports a bad
+    # secret rather than a missing one. Naming the variable that is empty is what
+    # makes the token that never expires reachable in one step.
+    if config.app_credentials_configured:
+        print("App credentials: set (a Page token that does not expire can be minted)")
+    elif missing := config.missing_app_credential:
+        other = ENV_APP_SECRET if missing == ENV_APP_ID else ENV_APP_ID
+        print(
+            f"App credentials: INCOMPLETE - {missing} is not set while {other} is. "
+            "Set both or neither; Graph rejects an exchange that carries only one.",
+            file=sys.stderr,
+        )
+    else:
+        print("App credentials: not set (optional; needed only to mint a Page token that does not expire)")
     perms = ",".join(config.tool_permissions) or "<none>"
     print(f"Tool perms:      {perms} (MCP_TOOL_PERMISSIONS)")
     if "delete" in config.tool_permissions:

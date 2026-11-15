@@ -401,7 +401,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.6.0"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.6.1"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with
@@ -441,6 +441,21 @@ Restart it. The startup line and `facebook_pages_status` both name the version i
 use, so compare them with `FB_GRAPH_VERSION`. If you installed with `pip install .`
 rather than `pip install -e .`, a later source edit is not picked up until you
 install again.
+
+**A tool you added is missing, or behaves as it did before the change.** The
+process you are calling is not the build you edited. A rebuild on disk changes
+nothing until the running process is replaced, and an MCP client can stay attached
+to an older process across a rebuild. `facebook_pages_list_tools` lists the tools
+the serving process registered, so a tool that is absent there is not in that
+process regardless of what the source says. Confirm the version the same way:
+`curl http://<host>:<port>/health` prints the `version` the process was built
+from. Compare it with `--version` for the package you intend to run.
+
+**The token exchange answers `Error validating client secret` (code 1).** The App
+ID was accepted and the secret was not, which is what a half-set pair looks like:
+Graph receives an empty `client_secret` and reports it as invalid rather than as
+missing. `check` and `facebook_pages_status` name the variable that is unset as
+`missing_app_credential`. Set both `FB_APP_ID` and `FB_APP_SECRET`, or neither.
 
 **Insights return an invalid-metric error (code 100).** One unsupported metric
 fails the whole request. A metric the server knows the API refuses is caught
