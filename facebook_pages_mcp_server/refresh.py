@@ -51,16 +51,21 @@ async def mint_page_token(
     a problem with the inputs or the result raises :class:`RefreshError`.
     """
     if not (app_id and app_secret):
-        missing = " and ".join(
+        missing = [
             name
-            for name, present in (("FB_APP_ID", app_id), ("FB_APP_SECRET", app_secret))
+            for name, present in (
+                ("FB_APP_ID", app_id),
+                ("FB_APP_SECRET", app_secret),
+            )
             if not present
-        )
+        ]
+        names = " and ".join(missing)
+        verb = "are" if len(missing) > 1 else "is"
         raise RefreshError(
-            f"{missing} is not set, so the token cannot be exchanged: the exchange "
-            "authenticates as the app, not with an access token. Set both in the "
-            "server's environment, or pass app_id and app_secret with this call. "
-            "They are in your app's dashboard under Settings > Basic."
+            f"{names} {verb} not set, so the token cannot be exchanged: the "
+            "exchange authenticates as the app, not with an access token. Set both "
+            "in the server's environment, or pass app_id and app_secret with this "
+            "call. They are in your app's dashboard under Settings > Basic."
         )
     if not user_token:
         raise RefreshError(
