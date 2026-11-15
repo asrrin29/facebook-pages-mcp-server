@@ -85,11 +85,13 @@ The reference tables still print the deprecated names, so they are not a reliabl
 guide. The list the API enforces is
 [Deprecated Facebook Page Insights Metrics](https://developers.facebook.com/documentation/pages-api/platforminsights/page/deprecated-metrics).
 One rejected metric fails the whole Insights request with error 100, which is why
-the tools never offer them. Every name Meta has published is known to the server:
-`page_insights_metrics` lists them under `retired_metrics` with the replacement,
-and an Insights request that names one is answered with that replacement instead
-of being sent to the API. A metric Meta rejects for a reason outside that list
-still reaches the API and is reported as Graph states it.
+the tools never offer them. `page_insights_metrics` lists every name the API
+refuses under `retired_metrics`, with the replacement, and an Insights request
+that names one is answered with that replacement instead of being sent to the
+API. That list is Meta's published list plus names a live Page has been seen
+rejecting: `page_post_engagements` is absent from Meta's page, yet v27.0 answers
+it as invalid, so it is treated the same way. A metric outside both is still sent
+to the API and reported as Graph states it.
 
 Three constraints worth knowing before you build a report: Page Insights are only
 available for Pages with 100 or more likes, most metrics update once per day, and
@@ -105,10 +107,14 @@ Two behaviours to plan around:
 
 - A field the API does not recognise fails the whole request with error 100
   rather than returning nothing. The error names the field, so drop it and retry.
-- Some fields are accepted on one endpoint and rejected on another. `attachments`
-  works on a single post node and fails the `/{page-id}/posts` edge with error
-  12, so the default for `page_posts_list` leaves it out and `post_get` includes
-  it. Read attachments one post at a time.
+- Some fields are accepted on one endpoint and rejected on another. The Post
+  field `link` fails any post request with error 12 and a message about
+  `deprecate_post_aggregated_fields_for_attachement`. The message names
+  attachments, which are accepted; `link` is the field at fault. Use
+  `permalink_url`, which answers the same need, and the defaults omit `link`.
+  `attachments` is accepted on a post node and on the `/{page-id}/posts` edge, so
+  it is included for `post_get` and left out of list responses to keep them
+  small.
 
 The tools never send one field name twice. Graph reports a syntax error (2500)
 when `fields` and `extra_fields` name the same field, so a name already present
@@ -169,6 +175,23 @@ facebook-pages-mcp-server check
 #   OK: type=PAGE app='1234567890' scopes=4
 #   Expiry: none (this token does not expire)
 ```
+
+### Using a token for one call
+
+Every tool also accepts an `access_token` argument that applies to that call
+alone. Use it when the token you hold was never put in the server's environment,
+or when the configured token has expired and nothing has been restarted:
+
+```json
+{"tool": "page_posts_list", "arguments": {"page_id": "846466585206528", "access_token": "EAAG..."}}
+```
+
+The configured token is a default, not the only credential a request may use. A
+token given with a request is used for that request's `Authorization` header and
+is never forwarded to Graph as a parameter. Nothing in the server changes: the
+next call without one goes back to the configured value. `token_debug` and
+`facebook_pages_status` inspect the token given with the call, so a token can be
+checked before anything else is attempted.
 
 ### Replacing an expired token without a restart
 
@@ -320,7 +343,7 @@ docker compose up -d --build
 
 # 3. verify
 curl http://localhost:8900/health
-# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.4.1"}
+# → {"status": "ok", "server": "facebook-pages-mcp-server", "version": "1.5.0"}
 ```
 
 MCP clients connect to `http://<host>:8900/mcp` with
@@ -362,11 +385,11 @@ rather than `pip install -e .`, a later source edit is not picked up until you
 install again.
 
 **Insights return an invalid-metric error (code 100).** One unsupported metric
-fails the whole request. A metric on Meta's published deprecated list is caught
+fails the whole request. A metric the server knows the API refuses is caught
 before the request and answered with its replacement, so this error now means a
-name Meta rejects for a reason outside that list. Call `page_insights_metrics`
-and read `retired_metrics` for the replacement. The list Meta enforces is linked
-under "Reading Page Insights" above; the reference tables still print deprecated
+name that is not on that list. Call `page_insights_metrics` and read
+`retired_metrics` for the replacement. The list Meta enforces is linked under
+"Reading Page Insights" above; the reference tables still print deprecated
 names.
 
 **A read fails on a field you did not ask for.** Drop the field named in the
@@ -376,9 +399,10 @@ another, as described under "Choosing fields".
 **Every call fails with code 190.** The Facebook token is the problem, not the
 code. An expired token says so and quotes the date Graph gave, for example
 `Session has expired on Friday, 13-Nov-26 14:00:00 PST`. Mint a new one as
-described under "Get a Page access token", then pass it to
-`facebook_pages_set_token`. `facebook_pages_status` reports the expiry of the
-token in use, and `check` prints it before the server starts.
+described under "Get a Page access token". Pass it to
+`facebook_pages_set_token` to use it from now on, or name it as `access_token`
+with a single call to use it once. `facebook_pages_status` reports the expiry of
+the token in use, and `check` prints it before the server starts.
 
 ## Development
 

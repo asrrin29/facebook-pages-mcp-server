@@ -14,14 +14,14 @@ from facebook_pages_mcp_server.config import (
     ConfigError,
     load_config,
 )
-from facebook_pages_mcp_server.graph import GraphClient, GraphError
+from facebook_pages_mcp_server.graph import GraphClient, GraphError, call_token
 from facebook_pages_mcp_server.specs import (
     INSIGHTS_METRICS,
     PAGE_FIELDS,
     POST_DETAIL_FIELDS,
     POST_INSIGHTS_METRICS,
     POST_FIELDS,
-    RETIRED_INSIGHTS_METRICS,
+    UNUSABLE_INSIGHTS_METRICS,
     join_fields,
 )
 from tests import mock_graph
@@ -181,14 +181,22 @@ def test_offered_insights_metrics_are_not_retired():
     # One rejected metric fails the whole Insights request, so the catalog must
     # never offer a name that the API rejects.
     offered = [m for group in INSIGHTS_METRICS.values() for m in group] + list(POST_INSIGHTS_METRICS)
-    assert not [m for m in offered if m in RETIRED_INSIGHTS_METRICS]
+    assert not [m for m in offered if m in UNUSABLE_INSIGHTS_METRICS]
     # The mock rejects the names a live Page was observed rejecting.
-    assert mock_graph.REJECTED_INSIGHTS_METRICS <= set(RETIRED_INSIGHTS_METRICS)
+    assert mock_graph.REJECTED_INSIGHTS_METRICS <= set(UNUSABLE_INSIGHTS_METRICS)
 
 
-def test_post_list_fields_omit_attachments():
-    # On the /{page-id}/posts edge `attachments` fails the whole request with
-    # Graph error 12, so the list default must not include it.
+def test_post_field_defaults_omit_link():
+    # `link` on a Post fails the whole request with Graph error 12, naming
+    # deprecate_post_aggregated_fields_for_attachement. The error text points at
+    # attachments, which is not the field at fault: `attachments` is accepted on
+    # both a post node and the /posts edge, and `link` is rejected on both.
+    # `permalink_url` answers the same need and is kept.
+    assert "link" not in POST_FIELDS
+    assert "link" not in POST_DETAIL_FIELDS
+    assert "permalink_url" in POST_FIELDS
+    # Kept out of the list default to keep list responses small, not because the
+    # API rejects it.
     assert "attachments" not in POST_FIELDS
     assert "attachments" in POST_DETAIL_FIELDS
 
@@ -209,6 +217,40 @@ async def test_get_sends_bearer_token_and_parses_data(graph):
     assert payload["name"] == "Prime Time IT"
     entry = mock_graph.find("1001")
     assert entry["query"]["fields"] == "id,name"
+
+
+async def test_a_supplied_token_overrides_the_configured_one(graph):
+    """A token carried by the request is the token the request uses.
+
+    The configured token is a default. A caller that holds a token must be able to
+    use it without changing the process, which is the case where a token supplied
+    through a prompt was ignored and every call reported the configured token's
+    error.
+    """
+    config = _config(graph_base_url=graph.base_url, page_token=mock_graph.EXPIRED_TOKEN)
+    async with GraphClient(config) as client:
+        with call_token(mock_graph.FRESH_TOKEN):
+            payload = await client.get("1001", {"fields": "id,name"})
+        assert payload["name"] == "Prime Time IT"
+        entry = mock_graph.find_last("1001")
+        assert entry["headers"]["authorization"] == f"Bearer {mock_graph.FRESH_TOKEN}"
+        # The token authorizes the call; it is not a Graph parameter.
+        assert "access_token" not in entry["query"]
+
+        # Outside the context the configured token is used again, unchanged.
+        with pytest.raises(GraphError):
+            await client.get("1001", {"fields": "id,name"})
+        assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.EXPIRED_TOKEN}"
+        )
+
+        # An explicit argument does the same without a context, and wins over the
+        # context value so a wrapped call can still name its own token.
+        with call_token(mock_graph.VALID_TOKEN):
+            await client.get("1001", {"fields": "id,name"}, token=mock_graph.FRESH_TOKEN)
+        assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.FRESH_TOKEN}"
+        )
 
 
 async def test_graph_error_fields_are_exposed(graph):

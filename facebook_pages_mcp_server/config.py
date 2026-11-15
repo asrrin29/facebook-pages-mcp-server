@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 SERVER_NAME = "facebook-pages-mcp-server"
-SERVER_VERSION = "1.4.1"
+SERVER_VERSION = "1.5.0"
 
 DEFAULT_GRAPH_VERSION = "v27.0"
 DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com"

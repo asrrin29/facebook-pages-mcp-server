@@ -80,7 +80,6 @@ POST_FIELDS: tuple[str, ...] = (
     "created_time",
     "updated_time",
     "permalink_url",
-    "link",
     "full_picture",
     "shares",
     "comments.summary(true).filter(toplevel).limit(3)",
@@ -90,7 +89,8 @@ POST_FIELDS: tuple[str, ...] = (
     "with_tags",
 )
 
-# Fields for a single post node, where `attachments` is accepted.
+# A post node also answers `attachments`. It is left out of the list default to
+# keep list responses small; it is not rejected by the /posts edge.
 POST_DETAIL_FIELDS: tuple[str, ...] = (*POST_FIELDS, "attachments")
 
 COMMENT_FIELDS: tuple[str, ...] = (
@@ -180,7 +180,6 @@ MESSAGE_FIELDS: tuple[str, ...] = (
 INSIGHTS_METRICS: dict[str, tuple[str, ...]] = {
     "audience": ("page_follows", "page_follows_city", "page_follows_country"),
     "engagement": (
-        "page_post_engagements",
         "page_total_actions",
         "page_views_total",
     ),
@@ -221,6 +220,18 @@ INSIGHTS_METRICS: dict[str, tuple[str, ...]] = {
 # impressions metrics. The reference pages also mention a further set deprecated
 # on 2026-06-15, which is not published; re-check the list when Insights calls
 # start failing.
+# Names the API rejects that Meta's published list does not carry. The API's
+# behaviour decides what may be requested, so these are treated the same way as
+# the retired names above: never offered, and answered before the request. An
+# empty replacement means none is known.
+#
+# page_post_engagements is absent from Meta's list and the reference still
+# describes it, but a live Page on v27.0 rejected it twice, naming it invalid.
+API_REJECTED_INSIGHTS_METRICS: dict[str, str] = {
+    "page_post_engagements": "",
+}
+
+
 RETIRED_INSIGHTS_METRICS: dict[str, str] = {
     # Page and post reach.
     "page_impressions": "page_media_view",
@@ -336,6 +347,15 @@ RETIRED_INSIGHTS_METRICS: dict[str, str] = {
     "post_impressions_fan_paid": "",
     "post_impressions_fan_paid_unique": "",
 }
+
+# Every name that must never be offered: Meta's published list, plus the names
+# the API rejects on its own. One source for the request check and the reference
+# tool, so the two cannot disagree about what may be asked for.
+UNUSABLE_INSIGHTS_METRICS: dict[str, str] = {
+    **RETIRED_INSIGHTS_METRICS,
+    **API_REJECTED_INSIGHTS_METRICS,
+}
+
 
 POST_INSIGHTS_METRICS: tuple[str, ...] = (
     "post_total_media_view_unique",

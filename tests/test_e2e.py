@@ -221,9 +221,20 @@ async def test_stdio_tool_list_and_calls(mock):
         assert "page_content_activity (no replacement)" in result.content[0].text
         assert len(mock_graph.REQUESTS) == before
 
+        # A metric the API rejects without listing it is caught the same way. A
+        # live Page on v27.0 rejected page_post_engagements twice, so it must not
+        # be offered and must not reach the API.
+        result = await client.call_tool(
+            "page_insights", {"page_id": "1001", "metrics": ["page_post_engagements"]}
+        )
+        assert result.is_error
+        assert "page_post_engagements (no replacement)" in result.content[0].text
+        assert len(mock_graph.REQUESTS) == before
+
         # metric reference
         data = _tool_text(await client.call_tool("page_insights_metrics", {"group": "engagement"}))
-        assert "page_post_engagements" in data["page_metrics_by_group"]["engagement"]
+        assert "page_post_engagements" not in data["page_metrics_by_group"]["engagement"]
+        assert "page_total_actions" in data["page_metrics_by_group"]["engagement"]
         assert set(data["page_metrics_by_group"]) == {"engagement"}
 
         all_metrics = _tool_text(await client.call_tool("page_insights_metrics", {}))
@@ -235,6 +246,7 @@ async def test_stdio_tool_list_and_calls(mock):
         assert not [m for m in offered if m in all_metrics["retired_metrics"]]
         assert all_metrics["retired_metrics"]["page_impressions"] == "page_media_view"
         assert all_metrics["retired_metrics"]["page_fans"] == "page_follows"
+        assert all_metrics["retired_metrics"]["page_post_engagements"] == "no replacement"
 
         # batch read: one call, two Graph requests. Graph names the target of a
         # batch entry relative_url, so that is what must reach the API.
@@ -273,12 +285,13 @@ async def test_reported_failures_no_longer_occur(mock):
     """One test per failure reported against a live Page, asserted on the request sent."""
     env = _env(mock, MCP_TOOL_PERMISSIONS="read,write,delete")
     async with Client(_server_params(env)) as client:
-        # 1. page_posts_list with its default fields must not ask for
-        #    attachments, which Graph rejects on that edge with error 12.
+        # 1. page_posts_list with its default fields must not ask for the Post
+        #    field `link`, which fails the request with Graph error 12.
         data = _tool_text(await client.call_tool("page_posts_list", {"page_id": "1001"}))
         assert data["data"][0]["id"] == "1001_7001"
         fields = mock_graph.find("1001/posts")["query"]["fields"]
-        assert "attachments" not in fields.split(",")
+        assert "link" not in fields.split(",")
+        assert "permalink_url" in fields.split(",")
 
         # 2. post_get must not name comments or likes twice when a caller adds
         #    them through extra_fields; Graph answers that with error 2500.
@@ -466,6 +479,81 @@ async def test_stdio_set_token_replaces_an_expired_token_without_restart(mock):
         # The self-reported manifest lists the setter itself.
         listed = _tool_text(await client.call_tool("facebook_pages_list_tools", {}))
         assert "facebook_pages_set_token" in {t["tool"] for t in listed["tools"]}
+
+
+async def test_stdio_a_token_supplied_with_a_call_reaches_the_request_layer(mock):
+    """A token passed with a request must be the token that request uses.
+
+    The reported failure was a token supplied through a prompt while the server
+    held an expired one in its environment: every tool answered with the expired
+    token's error, and only a call with the token in the URL worked. The
+    configured value is a default, not the only credential a call may use.
+    """
+    env = _env(mock, FB_PAGE_TOKEN=mock_graph.EXPIRED_TOKEN, MCP_TOOL_PERMISSIONS="read")
+    async with Client(_server_params(env)) as client:
+        # The configured token is dead, so a call without one fails.
+        result = await client.call_tool("page_get", {"page_id": "1001"})
+        assert result.is_error
+        assert "Session has expired" in result.content[0].text
+
+        # The same call with a token supplied works, and the request the server
+        # sent carried that token and no access_token parameter.
+        data = _tool_text(
+            await client.call_tool(
+                "page_get",
+                {"page_id": "1001", "access_token": mock_graph.FRESH_TOKEN},
+            )
+        )
+        assert data["id"] == "1001"
+        sent = mock_graph.find_last("1001")
+        assert sent["headers"]["authorization"] == f"Bearer {mock_graph.FRESH_TOKEN}"
+        assert "access_token" not in sent["query"]
+
+        # The token is used for that call only: the next call without one is back
+        # to the configured value, and nothing in the process was changed.
+        result = await client.call_tool("page_get", {"page_id": "1001"})
+        assert result.is_error
+        assert mock_graph.find_last("1001")["headers"]["authorization"] == (
+            f"Bearer {mock_graph.EXPIRED_TOKEN}"
+        )
+
+        # The names an AI client reaches for are accepted, and a value copied
+        # from a header is used as written.
+        for argument, value in (
+            ("token", mock_graph.FRESH_TOKEN),
+            ("page_token", mock_graph.FRESH_TOKEN),
+            ("access_token", f"Bearer {mock_graph.FRESH_TOKEN}"),
+        ):
+            data = _tool_text(
+                await client.call_tool(
+                    "page_posts_list", {"page_id": "1001", argument: value}
+                )
+            )
+            assert data["data"], argument
+            assert mock_graph.find_last("1001/posts")["headers"]["authorization"] == (
+                f"Bearer {mock_graph.FRESH_TOKEN}"
+            )
+
+        # A token supplied with the request is also the token token_debug
+        # inspects when no subject is named, so a caller can check the token it
+        # just passed without the configured one being in the way.
+        debug = _tool_text(
+            await client.call_tool("token_debug", {"access_token": mock_graph.FRESH_TOKEN})
+        )
+        assert debug["data"]["is_valid"] is True
+        assert mock_graph.find_last("debug_token")["query"]["input_token"] == (
+            mock_graph.FRESH_TOKEN
+        )
+
+        # Every tool advertises the parameter, so a client following the schema
+        # can supply a token. set_token is excluded: it declares it itself.
+        listed = await client.list_tools()
+        for tool in listed.tools:
+            properties = tool.input_schema["properties"]
+            if tool.name == "facebook_pages_set_token":
+                assert properties["access_token"]["type"] == "string"
+                continue
+            assert "access_token" in properties, tool.name
 
 
 async def test_stdio_set_token_accepts_the_names_an_ai_client_reaches_for(mock):
@@ -729,6 +817,26 @@ async def test_http_requires_bearer_key(mock):
                     after_set = await session.call_tool("page_get", {"page_id": "1001"})
                     assert not after_set.is_error
                     assert len(mock_graph.REQUESTS) > started
+                    assert mock_graph.REQUESTS[-1]["headers"]["authorization"] == (
+                        f"Bearer {mock_graph.FRESH_TOKEN}"
+                    )
+
+                    # A token supplied with a single request wins over the token in
+                    # force for the process, on this transport too. This is the
+                    # path an AI client uses, and the reported failure was a token
+                    # passed with a request being ignored.
+                    one_call = await session.call_tool(
+                        "page_get",
+                        {"page_id": "1001", "access_token": mock_graph.VALID_TOKEN},
+                    )
+                    assert not one_call.is_error
+                    assert mock_graph.REQUESTS[-1]["headers"]["authorization"] == (
+                        f"Bearer {mock_graph.VALID_TOKEN}"
+                    )
+                    assert "access_token" not in mock_graph.REQUESTS[-1]["query"]
+
+                    reverted = await session.call_tool("page_get", {"page_id": "1001"})
+                    assert not reverted.is_error
                     assert mock_graph.REQUESTS[-1]["headers"]["authorization"] == (
                         f"Bearer {mock_graph.FRESH_TOKEN}"
                     )

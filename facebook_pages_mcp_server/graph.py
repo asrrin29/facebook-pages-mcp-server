@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -32,6 +34,31 @@ logger = logging.getLogger("facebook_pages_mcp_server")
 # Graph error codes that mean "try again later" rather than "your request is wrong".
 RETRYABLE_ERROR_CODES: frozenset[int] = frozenset({1, 2, 4, 17, 32})
 RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+# The access token for the tool call in flight, set when the caller supplied a
+# token with the request instead of relying on the configured value. Every Graph
+# request made while that value is set authenticates with it. A context-local
+# value keeps concurrent calls independent, and lets every request helper keep
+# the arguments it already takes.
+_CALL_TOKEN: ContextVar[str | None] = ContextVar("graph_call_token", default=None)
+
+
+@contextmanager
+def call_token(token: str | None):
+    """Authenticate the Graph requests made inside this block with ``token``."""
+    if not token:
+        yield
+        return
+    previous = _CALL_TOKEN.set(token)
+    try:
+        yield
+    finally:
+        _CALL_TOKEN.reset(previous)
+
+
+def current_call_token() -> str | None:
+    """Return the token in force for the call in flight, if the caller gave one."""
+    return _CALL_TOKEN.get()
 
 
 class GraphError(RuntimeError):
@@ -104,13 +131,16 @@ class GraphClient:
         params: dict[str, Any] | None = None,
         *,
         scope: str = "page",
+        token: str | None = None,
     ) -> Any:
         """GET a path under the versioned root (``/{page_id}/posts`` and friends)."""
-        return await self._request("GET", path.lstrip("/"), query=params, scope=scope)
+        return await self._request(
+            "GET", path.lstrip("/"), query=params, scope=scope, token=token
+        )
 
-    async def get_url(self, url: str, *, scope: str = "page") -> Any:
+    async def get_url(self, url: str, *, scope: str = "page", token: str | None = None) -> Any:
         """GET an absolute URL, used to follow ``paging.next`` links."""
-        return await self._request("GET", url, scope=scope)
+        return await self._request("GET", url, scope=scope, token=token)
 
     async def post(
         self,
@@ -119,15 +149,18 @@ class GraphClient:
         *,
         query: dict[str, Any] | None = None,
         scope: str = "page",
+        token: str | None = None,
     ) -> Any:
         """POST to a path; parameters go in the form body to keep URLs short."""
-        return await self._request("POST", path.lstrip("/"), query=query, form=data, scope=scope)
+        return await self._request(
+            "POST", path.lstrip("/"), query=query, form=data, scope=scope, token=token
+        )
 
-    async def delete(self, path: str, *, scope: str = "page") -> Any:
+    async def delete(self, path: str, *, scope: str = "page", token: str | None = None) -> Any:
         """DELETE a node (Graph delete calls take no parameters)."""
-        return await self._request("DELETE", path.lstrip("/"), scope=scope)
+        return await self._request("DELETE", path.lstrip("/"), scope=scope, token=token)
 
-    async def batch(self, entries: list[dict[str, Any]]) -> Any:
+    async def batch(self, entries: list[dict[str, Any]], *, token: str | None = None) -> Any:
         """Run a batch of requests in one call to the version root.
 
         ``entries`` is the Graph batch array (``{"method": "GET", "relative_url":
@@ -139,6 +172,7 @@ class GraphClient:
             "",
             form={"batch": json.dumps(entries), "include_headers": "false"},
             scope="page",
+            token=token,
         )
 
     # ------------------------------------------------------------------
@@ -153,14 +187,20 @@ class GraphClient:
         query: dict[str, Any] | None = None,
         form: dict[str, Any] | None = None,
         scope: str = "page",
+        token: str | None = None,
     ) -> Any:
-        token = self._config.token_for(scope)
-        if not token:
+        # A token given with the request is the token used, whatever the
+        # configured value holds: a caller that has just minted a token must not
+        # be blocked by a configured token that has expired. One rule for every
+        # scope, so a token of the wrong kind for the endpoint is reported by
+        # Graph rather than quietly replaced by a different credential.
+        resolved = token or _CALL_TOKEN.get() or self._config.token_for(scope)
+        if not resolved:
             raise GraphError(
                 f"No Facebook access token configured for a {scope}-scoped call. "
                 f"Set {'FB_USER_TOKEN' if scope == 'user' else 'FB_PAGE_TOKEN'}."
             )
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {"Authorization": f"Bearer {resolved}"}
         clean_query = _clean(query)
         clean_form = _clean(form)
 

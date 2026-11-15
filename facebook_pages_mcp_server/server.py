@@ -39,7 +39,7 @@ from pydantic import AliasChoices, Field
 from mcp.types import ToolAnnotations
 
 from .config import SERVER_NAME, SERVER_VERSION, Config
-from .graph import GraphClient, GraphError
+from .graph import GraphClient, GraphError, call_token as graph_call_token, current_call_token
 from .tokens import describe_token_error, token_state
 from .specs import (
     ALBUM_FIELDS,
@@ -57,7 +57,7 @@ from .specs import (
     POST_DETAIL_FIELDS,
     POST_FIELDS,
     POST_INSIGHTS_METRICS,
-    RETIRED_INSIGHTS_METRICS,
+    UNUSABLE_INSIGHTS_METRICS,
     TOOL_SPECS,
     VIDEO_FIELDS,
     join_fields,
@@ -185,22 +185,22 @@ def _metric_list(metrics: list[str] | None, tool_hint: str) -> str:
     names = [m.strip() for m in (metrics or []) if m and m.strip()]
     if not names:
         raise ToolError(f"metrics must list at least one metric name. {tool_hint}")
-    # One rejected metric fails the whole Insights request, so a metric on Meta's
-    # deprecated list is answered here, with its replacement, rather than costing
-    # a call that returns an unexplained error. A metric Meta rejects for a reason
-    # not in that list still reaches the API and is reported as Graph states it.
-    retired = [name for name in names if name in RETIRED_INSIGHTS_METRICS]
+    # One rejected metric fails the whole Insights request, so a metric the API
+    # will not accept is answered here, with its replacement, rather than costing
+    # a call that returns an unexplained error. A metric outside this set still
+    # reaches the API and is reported as Graph states it.
+    retired = [name for name in names if name in UNUSABLE_INSIGHTS_METRICS]
     if retired:
         named = "; ".join(
-            f"{name} -> {RETIRED_INSIGHTS_METRICS[name]}"
-            if RETIRED_INSIGHTS_METRICS[name]
+            f"{name} -> {UNUSABLE_INSIGHTS_METRICS[name]}"
+            if UNUSABLE_INSIGHTS_METRICS[name]
             else f"{name} (no replacement)"
             for name in retired
         )
         raise ToolError(
-            f"the metric(s) {named} are deprecated and the API rejects them; one "
-            "rejected metric fails the whole request. Replace them and try again. "
-            "page_insights_metrics lists current names and the full retired list. "
+            f"the API rejects the metric(s) {named}; one rejected metric fails the "
+            "whole request. Replace them and try again. page_insights_metrics "
+            "lists current names and every name the API rejects. "
             "https://developers.facebook.com/documentation/pages-api/"
             "platforminsights/page/deprecated-metrics"
         )
@@ -259,6 +259,56 @@ def _tool_description(name: str) -> str:
     return " ".join(parts)
 
 
+def _extract_call_token(arguments: dict[str, Any] | None) -> str | None:
+    """Return the access token supplied with a tool call, and remove it.
+
+    A caller may hold a token this server was not configured with, and a
+    configured token can expire while the process runs, so every tool accepts an
+    access token with the request under any of ``TOKEN_ARGUMENT_NAMES``. The
+    value is removed from the arguments here: it is used for the request's
+    ``Authorization`` header, and must not be sent to Graph as a parameter named
+    ``access_token``.
+    """
+    if not arguments:
+        return None
+    token: str | None = None
+    for name in TOKEN_ARGUMENT_NAMES:
+        value = arguments.pop(name, None)
+        if token is None and isinstance(value, str) and value.strip():
+            token = _normalize_token(value)
+    return token
+
+
+# Added to every tool's advertised schema. An AI client reaches for this name
+# first, and a parameter the client cannot see is a parameter it will not send.
+CALL_TOKEN_SCHEMA: dict[str, Any] = {
+    "anyOf": [{"type": "string"}, {"type": "null"}],
+    "default": None,
+    "description": (
+        "Optional Facebook Page access token for this call only. Use it when the "
+        "token you hold is not the one this server was configured with, or when "
+        "the configured token has expired. Takes effect for this call and nothing "
+        "else. Also accepted as token or page_token."
+    ),
+}
+
+
+def _advertise_call_token(mcp: MCPServer) -> None:
+    """Show the optional per-call access token on every tool that makes a call.
+
+    The parameter is handled before any tool runs, so it is absent from the tool
+    signatures and would otherwise be invisible to a client that follows the
+    advertised schema. ``facebook_pages_set_token`` is skipped: it declares the
+    parameter itself, because its job is to keep the token.
+    """
+    for tool in mcp._tool_manager.list_tools():
+        if tool.name == "facebook_pages_set_token":
+            continue
+        properties = tool.parameters.get("properties")
+        if isinstance(properties, dict):
+            properties["access_token"] = dict(CALL_TOKEN_SCHEMA)
+
+
 def _permission_summary(config: Config) -> str:
     if not config.tool_permissions:
         return "NO Facebook tools are enabled (set MCP_TOOL_PERMISSIONS to read, write, or delete)"
@@ -291,8 +341,10 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             "tools ship sensible defaults and accept fields or extra_fields to change "
             "them. Edges are paginated: when more_available is true, pass next_url to "
             "graph_follow. Insights need metric names; page_insights_metrics lists names "
-            "worth trying. Facebook access tokens live in the server environment and are "
-            "never passed as tool arguments. "
+            "worth trying. A Facebook access token normally comes from the server "
+            "environment. Any tool also accepts an access_token argument, which is used "
+            "for that call alone: pass the token you hold when the configured one is "
+            "expired or is not yours. "
             f"Tool permissions for this server ({_permission_summary(config)})."
         ),
         version=SERVER_VERSION,
@@ -437,12 +489,12 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         return {
             "page_metrics_by_group": {name: list(metrics) for name, metrics in groups.items()},
             "post_metrics": list(POST_INSIGHTS_METRICS),
-            # One map keyed by every name the API rejects, so a metric a caller
-            # supplies resolves here whatever its value. The value is the
-            # replacement Meta names, or "no replacement" where Meta names none.
+            # One map keyed by every name the API will not accept, so a metric a
+            # caller supplies resolves here whatever its value. The value is the
+            # replacement Meta names, or "no replacement" where none is known.
             "retired_metrics": {
                 name: (replacement or "no replacement")
-                for name, replacement in RETIRED_INSIGHTS_METRICS.items()
+                for name, replacement in UNUSABLE_INSIGHTS_METRICS.items()
             },
             "periods": list(INSIGHTS_PERIODS),
             "date_presets": list(INSIGHTS_DATE_PRESETS),
@@ -559,10 +611,15 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
 
     async def token_debug(input_token: str | None = None) -> dict[str, Any]:
         # Graph requires input_token; without it the call always fails. The
-        # default subject is the token this process is using now, which includes
-        # a token supplied to facebook_pages_set_token. Reading the configuration
-        # captured at start would inspect a token that is no longer in use.
-        subject = (input_token or "").strip() or state.config.page_token
+        # default subject is the token this call is authenticated with: a token
+        # supplied with the request, then a token set at run time, then the
+        # configured one. Reading the configuration captured at start would
+        # inspect a token that is no longer in use.
+        subject = (
+            (input_token or "").strip()
+            or current_call_token()
+            or state.config.page_token
+        )
         if not subject:
             raise ToolError(
                 "input_token is required and no FB_PAGE_TOKEN is configured to inspect instead."
@@ -741,9 +798,12 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
         # A token that is configured is not a token that works. An expired Page
         # token otherwise shows here as ready: true until some other call fails.
         # debug_token is one cheap call, so the status is reported live by default.
+        # The token inspected is the one this call would use: a token supplied
+        # with the request, otherwise the one in force for the process.
+        subject = current_call_token() or cfg.page_token
         try:
             payload = await state.call(
-                lambda c: c.get("debug_token", {"input_token": cfg.page_token})
+                lambda c: c.get("debug_token", {"input_token": subject})
             )
         except ToolError as exc:
             info["ready"] = False
@@ -891,6 +951,29 @@ def build_server(config: Config) -> tuple[MCPServer, ServerState]:
             annotations=tier_annotations.get(spec.tier),
         )
         registered.append(spec.name)
+
+    # Both transports reach tools through call_tool, so the per-call access token
+    # is read and applied here rather than in each tool. Every Graph request the
+    # tool makes while the block is open authenticates with that token; nothing
+    # the server was configured with is changed, and the token is gone when the
+    # call ends.
+    call_tool = mcp.call_tool
+
+    async def call_tool_with_token(
+        name: str,
+        arguments: dict[str, Any],
+        context: Any = None,
+    ) -> Any:
+        # facebook_pages_set_token declares the parameter itself, because keeping
+        # the token is its job. Every other tool has it removed here so no tool
+        # can forward it to Graph as a parameter named access_token.
+        token = None if name == "facebook_pages_set_token" else _extract_call_token(arguments)
+        with graph_call_token(token):
+            return await call_tool(name, arguments, context)
+
+    mcp.call_tool = call_tool_with_token
+
+    _advertise_call_token(mcp)
 
     logger.info(
         "Registered %d Facebook tools, gated out %d (MCP_TOOL_PERMISSIONS=%s)",

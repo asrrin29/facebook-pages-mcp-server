@@ -86,6 +86,7 @@ REJECTED_INSIGHTS_METRICS = {
     "page_fan_removes",
     "page_impressions",
     "page_impressions_unique",
+    "page_post_engagements",
     "post_impressions",
     "post_impressions_unique",
 }
@@ -334,9 +335,12 @@ async def _dispatch(request: Request) -> JSONResponse:
     if fields_error := _check_fields(request):
         return fields_error
 
-    if segments[-1] == "posts" and "attachments" in request.query_params.get("fields", ""):
-        # On the /{page-id}/posts edge Graph resolves attachments through a
-        # legacy aggregated path and rejects the whole request.
+    on_a_post = segments[-1] == "posts" or (len(segments) == 1 and "_" in segments[0])
+    requested_fields = {f.split(".")[0] for f in request.query_params.get("fields", "").split(",") if f}
+    if on_a_post and "link" in requested_fields:
+        # The Post field `link` resolves through a legacy aggregated path and
+        # fails the whole request with error 12. The message names attachments,
+        # which Graph accepts on both a post node and the /posts edge.
         return _graph_error(
             "(#12) deprecate_post_aggregated_fields_for_attachement is deprecated "
             "for versions v3.3 and higher.",
